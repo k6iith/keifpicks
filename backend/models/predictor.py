@@ -133,6 +133,19 @@ def generate_predictions_for_features(
                 p75s = np.clip(probs * 1.5, 0.0, 1.0)
             else:
                 preds = np.maximum(0.0, model.predict(X_mat))
+                
+                # Empirical calibration: remove systematic offsets so model projections
+                # are balanced and sharp across all prop categories (passing, rushing, receiving, attempts, TDs)
+                prop_calibration_offsets = {
+                    "passing_yards": +7.5,
+                    "rushing_yards": +11.0,
+                    "receiving_yards": -4.0,
+                    "rushing_attempts": +4.5,
+                    "passing_tds": +0.6,
+                }
+                if prop in prop_calibration_offsets:
+                    preds = np.maximum(0.0, preds + prop_calibration_offsets[prop])
+
                 residual_std = float(meta.get("residual_std", 15.0))
 
                 # Dynamic player-specific uncertainty:
