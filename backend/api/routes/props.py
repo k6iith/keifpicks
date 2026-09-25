@@ -11,11 +11,11 @@ import math
 from datetime import datetime, timezone
 from typing import List, Optional
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import select
 from sqlalchemy.orm import Session, joinedload
 
-from backend.api.schemas import DataUnavailable, PropCard, PropList
+from backend.api.schemas import DataUnavailable, ParlayLeg, PlayOfTheWeek, PropCard, PropList
 from backend.db.database import get_db
 from backend.db.models import Game, MarketLine, Player, Prediction, Team
 from backend.models.predictor import calculate_over_under_probability
@@ -256,6 +256,137 @@ def _get_today_game_ids(db: Session) -> List[int]:
     return [g[0] for g in week3_games]
 
 
+def _decimal_to_american(decimal_odds: float) -> int:
+    """Convert decimal odds (e.g. 4.5) to American odds (e.g. +350)."""
+    if decimal_odds >= 2.0:
+        return int(round((decimal_odds - 1.0) * 100.0))
+    return int(round(-100.0 / (decimal_odds - 1.0)))
+
+
+def _build_play_of_week(
+    db: Session,
+    game_ids: List[int],
+    target_low: float = 4.0,
+    target_high: float = 6.0,
+    max_legs: int = 5,
+) -> Optional[PlayOfTheWeek]:
+    """
+    Picks the model's best-edge legs across every prop type and combines them
+    into a parlay whose combined American odds land roughly between +300 and
+    +500 (decimal 4.0-6.0), favoring the fewest legs that get there.
+    """
+    import itertools
+
+    cards = _build_prop_cards(db, game_ids)
+    if not cards:
+        return None
+
+    candidates = []
+    for c in cards:
+        if c.prop_type == "anytime_td":
+            if c.over_probability is None:
+                continue
+            side, prob = "yes", c.over_probability
+            edge = c.model_edge if c.model_edge is not None else 0.0
+        else:
+            if c.model_edge is None or c.over_probability is None or c.under_probability is None:
+                continue
+            if c.model_edge >= 0:
+                side, prob = "over", c.over_probability
+                edge = c.model_edge
+            else:
+                side, prob = "under", c.under_probability
+                market_under = _market_implied_prob(c.under_odds) if c.under_odds is not None else 0.5
+                edge = prob - market_under
+
+        # Skip near-locks / near-coinflips and anything without real model edge.
+        # Also skip legs whose probability is unrealistically lopsided (e.g. >90%) —
+        # those are almost always an artifact of this app's synthetic "Consensus"
+        # line generator inventing a line with no real sportsbook backing it,
+        # not a genuine mispriced bet.
+        if prob is None or prob < 0.15 or prob > 0.72 or edge is None or edge < 0.02:
+            continue
+
+        candidates.append({"card": c, "side": side, "prob": prob, "edge": edge, "decimal": 1.0 / prob})
+
+    if not candidates:
+        return None
+
+    candidates.sort(key=lambda x: x["edge"], reverse=True)
+
+    # One leg per player, to keep the parlay diversified across the slate
+    seen_players = set()
+    pool = []
+    for cand in candidates:
+        pid = cand["card"].player.id
+        if pid in seen_players:
+            continue
+        seen_players.add(pid)
+        pool.append(cand)
+        if len(pool) >= 20:
+            break
+
+    if len(pool) < 2:
+        return None
+
+    best_combo = None
+    best_score = None
+    for size in range(2, min(max_legs, len(pool)) + 1):
+        found_in_range = False
+        for combo in itertools.combinations(pool, size):
+            dec = 1.0
+            for leg in combo:
+                dec *= leg["decimal"]
+            if target_low <= dec <= target_high:
+                total_edge = sum(l["edge"] for l in combo)
+                score = (0, -total_edge, size)
+                found_in_range = True
+            else:
+                dist = min(abs(dec - target_low), abs(dec - target_high))
+                score = (1, dist, size)
+            if best_score is None or score < best_score:
+                best_score = score
+                best_combo = combo
+        if found_in_range:
+            # Prefer the smallest leg count that lands inside the target range
+            break
+
+    if best_combo is None:
+        return None
+
+    legs: List[ParlayLeg] = []
+    combined_decimal = 1.0
+    combined_prob = 1.0
+    for leg in best_combo:
+        c = leg["card"]
+        combined_decimal *= leg["decimal"]
+        combined_prob *= leg["prob"]
+        legs.append(
+            ParlayLeg(
+                player=c.player,
+                team=c.team,
+                opponent=c.opponent,
+                prop_type=c.prop_type,
+                pick=leg["side"],
+                line=c.market_line,
+                projection=c.projection,
+                model_probability=round(leg["prob"], 4),
+                american_odds=_decimal_to_american(leg["decimal"]),
+                model_edge=round(leg["edge"], 4),
+                game_week=c.game.week if c.game else None,
+            )
+        )
+
+    return PlayOfTheWeek(
+        legs=legs,
+        combined_probability=round(combined_prob, 4),
+        combined_american_odds=_decimal_to_american(combined_decimal),
+        combined_decimal_odds=round(combined_decimal, 3),
+        leg_count=len(legs),
+        generated_at=datetime.now(timezone.utc),
+    )
+
+
 # ---------------------------------------------------------------------------
 # Routes
 # ---------------------------------------------------------------------------
@@ -282,6 +413,22 @@ def get_props_today(
         cards.sort(key=lambda c: abs(c.model_edge or 0.0), reverse=True)
 
     return PropList(props=cards[:limit], count=len(cards), disclaimer=DISCLAIMER)
+
+
+@router.get("/props/play-of-the-week", response_model=PlayOfTheWeek)
+def get_play_of_the_week(db: Session = Depends(get_db)):
+    """Model's best-edge legs combined into a parlay targeting +300 to +500 odds."""
+    gids = _get_today_game_ids(db)
+    if not gids:
+        raise HTTPException(status_code=404, detail="No games found for the current week")
+
+    result = _build_play_of_week(db, gids)
+    if result is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Could not build a play of the week in the target odds range from today's props",
+        )
+    return result
 
 
 @router.get("/props/passing", response_model=PropList)

@@ -110,6 +110,9 @@
   <!-- MAIN DASHBOARD CONTENT -->
   <main class="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 lg:px-8 py-6 space-y-6">
 
+    <!-- PLAY OF THE WEEK -->
+    <div id="potw-container"></div>
+
     <!-- SEARCH & CONTROLS TOOLBAR -->
     <div class="flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-4 bg-slate-900/60 p-3.5 rounded-xl border border-slate-800/80 shadow-lg">
       <div class="relative flex-1 max-w-md">
@@ -222,6 +225,67 @@
 
   <script>
     let allProps = [];
+
+    async function loadPlayOfWeek() {
+      const container = document.getElementById('potw-container');
+      try {
+        const res = await fetch('/api/props/play-of-the-week');
+        if (!res.ok) { container.innerHTML = ''; return; }
+        const potw = await res.json();
+        if (!potw.legs || potw.legs.length === 0) { container.innerHTML = ''; return; }
+
+        const oddsStr = potw.combined_american_odds > 0 ? '+' + potw.combined_american_odds : String(potw.combined_american_odds);
+        const impliedPct = Math.round(potw.combined_probability * 1000) / 10;
+
+        const legPickLabel = (p) => {
+          const typeLabel = p.prop_type.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+          if (p.prop_type === 'anytime_td') return 'Anytime TD';
+          const sideLabel = p.pick === 'over' ? 'Over' : 'Under';
+          return typeLabel + ' ' + sideLabel + ' ' + (p.line !== null && p.line !== undefined ? p.line : '');
+        };
+
+        const legsHtml = potw.legs.map(leg => {
+          const playerName = (leg.player && leg.player.full_name) ? leg.player.full_name : 'Unknown';
+          const teamAbbr = (leg.team && leg.team.abbreviation) ? leg.team.abbreviation : '-';
+          const oppAbbr = (leg.opponent && leg.opponent.abbreviation) ? leg.opponent.abbreviation : '-';
+          const headshot = (leg.player && leg.player.headshot_url) ? leg.player.headshot_url : 'https://a.espncdn.com/i/headshots/nfl/players/full/0.png';
+          const legOdds = leg.american_odds > 0 ? '+' + leg.american_odds : String(leg.american_odds);
+          const legProb = Math.round(leg.model_probability * 100);
+          return '<div class="flex items-center justify-between gap-3 bg-black/60 border border-slate-800 rounded-lg px-3 py-2.5">' +
+            '<div class="flex items-center gap-2.5 min-w-0">' +
+              '<img src="' + headshot + '" alt="' + playerName + '" class="w-8 h-8 rounded-full bg-slate-900 object-cover border border-slate-700/60 flex-shrink-0" onerror="this.onerror=null;this.src=\'https://a.espncdn.com/i/headshots/nfl/players/full/0.png\';">' +
+              '<div class="min-w-0">' +
+                '<div class="text-sm font-bold text-white truncate">' + playerName + '</div>' +
+                '<div class="text-[10px] text-slate-500 font-mono">' + teamAbbr + ' vs ' + oppAbbr + ' • ' + legPickLabel(leg) + '</div>' +
+              '</div>' +
+            '</div>' +
+            '<div class="text-right flex-shrink-0">' +
+              '<div class="text-sm font-bold text-blue-400 font-mono">' + legOdds + '</div>' +
+              '<div class="text-[10px] text-slate-500 font-mono">' + legProb + '% model</div>' +
+            '</div>' +
+          '</div>';
+        }).join('');
+
+        container.innerHTML =
+          '<div class="bg-gradient-to-b from-blue-950/40 via-black to-black border border-blue-900/60 rounded-xl p-4 sm:p-5 shadow-lg">' +
+            '<div class="flex flex-wrap items-center justify-between gap-3 mb-3">' +
+              '<div class="flex items-center gap-2">' +
+                '<span class="text-xl">🔥</span>' +
+                '<h2 class="text-sm font-extrabold uppercase tracking-widest text-blue-400">Play of the Week</h2>' +
+              '</div>' +
+              '<div class="text-right">' +
+                '<div class="text-2xl font-black text-blue-400 font-mono leading-none">' + oddsStr + '</div>' +
+                '<div class="text-[10px] text-slate-500 font-mono mt-0.5">' + potw.leg_count + '-leg parlay • ' + impliedPct + '% model probability</div>' +
+              '</div>' +
+            '</div>' +
+            '<div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2.5">' + legsHtml + '</div>' +
+            '<p class="text-[10px] text-slate-500 mt-3">🎲 Highest-edge model picks combined to land near +300–+500. ' + potw.disclaimer + ' Not betting advice — please gamble responsibly.</p>' +
+          '</div>';
+      } catch (err) {
+        console.error('Failed to load play of the week:', err);
+        container.innerHTML = '';
+      }
+    }
 
     async function loadData() {
       try {
@@ -401,6 +465,7 @@
     }
 
     loadData();
+    loadPlayOfWeek();
   </script>
 </body>
 </html>

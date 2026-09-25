@@ -281,6 +281,32 @@ class PlayerDetail(BaseModel):
     disclaimer: str = DISCLAIMER
 
 
+class ParlayLeg(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    player: PlayerBase
+    team: Optional[TeamBase] = None
+    opponent: Optional[TeamBase] = None
+    prop_type: str
+    pick: str = Field(..., description="'over', 'under', or 'yes' (anytime_td)")
+    line: Optional[float] = None
+    projection: Optional[float] = None
+    model_probability: float = Field(..., description="Model-estimated probability this leg hits")
+    american_odds: int = Field(..., description="Fair American odds implied by the model probability")
+    model_edge: Optional[float] = Field(None, description="Model probability minus market-implied probability")
+    game_week: Optional[int] = None
+
+
+class PlayOfTheWeek(BaseModel):
+    legs: List[ParlayLeg]
+    combined_probability: float
+    combined_american_odds: int
+    combined_decimal_odds: float
+    leg_count: int
+    generated_at: datetime
+    disclaimer: str = DISCLAIMER
+
+
 # ---------------------------------------------------------------------------
 # Game detail
 # ---------------------------------------------------------------------------
