@@ -111,4 +111,9 @@ def find_player_by_name(
         return [c for c in q.all() if normalize_player_name(c.full_name) == target]
 
     if team_ids:
-        scoped = _candidates(scope
+        scoped = _candidates(scope_teams=True)
+        if scoped:
+            return _pick_best(db, scoped)
+
+    unscoped = _candidates(scope_teams=False)
+    return _pick_best(db, unscoped)
