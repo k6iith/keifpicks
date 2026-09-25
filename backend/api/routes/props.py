@@ -17,7 +17,7 @@ from sqlalchemy.orm import Session, joinedload
 
 from backend.api.schemas import DataUnavailable, PropCard, PropList
 from backend.db.database import get_db
-from backend.db.models import Game, MarketLine, Player, Prediction, Team, Roster
+from backend.db.models import Game, MarketLine, Player, Prediction, Team
 from backend.models.predictor import calculate_over_under_probability
 
 logger = logging.getLogger(__name__)
@@ -63,15 +63,6 @@ def _build_prop_cards(
         )
         .join(Player, Prediction.player_id == Player.id)
         .join(Game, Prediction.game_id == Game.id)
-        .join(
-            Roster,
-            and_(
-                Roster.player_id == Player.id,
-                Roster.team_id == Player.team_id,
-                Roster.season == 2026,
-                Roster.week == 3,
-            ),
-        )
         .where(
             Prediction.game_id.in_(game_ids),
             Prediction.is_current.is_(True),
@@ -79,13 +70,6 @@ def _build_prop_cards(
             or_(
                 Player.team_id == Game.home_team_id,
                 Player.team_id == Game.away_team_id,
-            ),
-            or_(
-                and_(Roster.depth_chart_position == "QB", Roster.depth_chart_rank == 1),
-                and_(Roster.depth_chart_position == "RB", Roster.depth_chart_rank.in_([1, 2])),
-                and_(Roster.depth_chart_position == "WR", Roster.depth_chart_rank.in_([1, 2, 3])),
-                and_(Roster.depth_chart_position == "TE", Roster.depth_chart_rank.in_([1, 2])),
-                and_(Roster.depth_chart_position == "K", Roster.depth_chart_rank == 1),
             ),
         )
     )
