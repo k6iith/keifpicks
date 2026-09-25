@@ -1,0 +1,32 @@
+{
+  "model_type": "passing_yards",
+  "target_col": "passing_yards",
+  "version": "1.0",
+  "features": [
+    "is_home",
+    "home_spread",
+    "game_total",
+    "games_played_season",
+    "dynamic_curr_weight",
+    "dynamic_hist_weight",
+    "passing_yards_3wk",
+    "passing_yards_5wk",
+    "passing_yards_8wk",
+    "passing_yards_ewma",
+    "passing_yards_career_avg",
+    "passing_yards_weighted_baseline",
+    "attempts_3wk",
+    "attempts_5wk",
+    "completion_pct",
+    "yards_per_attempt",
+    "passing_yards_trend",
+    "opp_pass_yards_allowed_rank"
+  ],
+  "mae": 68.06,
+  "rmse": 87.26,
+  "baseline_mae": 68.6,
+  "baseline_rmse": 89.58,
+  "residual_std": 87.16,
+  "trained_at": "2026-09-25T02:37:24.010429",
+  "n_samples": 1957
+}

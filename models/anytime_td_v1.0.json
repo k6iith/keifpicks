@@ -1,0 +1,29 @@
+{
+  "model_type": "anytime_td",
+  "version": "1.0",
+  "features": [
+    "is_home",
+    "home_spread",
+    "game_total",
+    "temperature_f",
+    "wind_mph",
+    "is_dome",
+    "games_played_season",
+    "dynamic_curr_weight",
+    "dynamic_hist_weight",
+    "rushing_yards_3wk",
+    "receiving_yards_3wk",
+    "carries_3wk",
+    "targets_3wk",
+    "carry_share_4wk",
+    "target_share_4wk",
+    "snap_pct_4wk",
+    "opp_rush_yards_allowed_rank",
+    "opp_pass_yards_allowed_rank"
+  ],
+  "brier_score": 0.1596,
+  "log_loss": 0.4913,
+  "baseline_brier": 0.1741,
+  "trained_at": "2026-09-25T02:37:34.241209",
+  "n_samples": 15054
+}

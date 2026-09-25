@@ -1,0 +1,26 @@
+{
+  "model_type": "rushing_attempts",
+  "target_col": "carries",
+  "version": "1.0",
+  "features": [
+    "is_home",
+    "home_spread",
+    "game_total",
+    "games_played_season",
+    "dynamic_curr_weight",
+    "dynamic_hist_weight",
+    "carries_3wk",
+    "carries_5wk",
+    "carries_career_avg",
+    "carries_weighted_baseline",
+    "carry_share_4wk",
+    "opp_rush_yards_allowed_rank"
+  ],
+  "mae": 3.23,
+  "rmse": 4.5,
+  "baseline_mae": 3.1,
+  "baseline_rmse": 4.29,
+  "residual_std": 4.49,
+  "trained_at": "2026-09-25T02:37:28.620015",
+  "n_samples": 6178
+}

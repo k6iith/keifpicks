@@ -1,0 +1,31 @@
+{
+  "model_type": "receptions",
+  "target_col": "receptions",
+  "version": "1.0",
+  "features": [
+    "is_home",
+    "home_spread",
+    "game_total",
+    "games_played_season",
+    "dynamic_curr_weight",
+    "dynamic_hist_weight",
+    "receptions_3wk",
+    "receptions_5wk",
+    "receptions_8wk",
+    "receptions_ewma",
+    "receptions_career_avg",
+    "receptions_weighted_baseline",
+    "targets_3wk",
+    "targets_5wk",
+    "target_share_4wk",
+    "opp_targets_allowed_to_wr_rank",
+    "opp_targets_allowed_to_te_rank"
+  ],
+  "mae": 1.38,
+  "rmse": 1.86,
+  "baseline_mae": 1.37,
+  "baseline_rmse": 1.88,
+  "residual_std": 1.86,
+  "trained_at": "2026-09-25T02:37:33.927309",
+  "n_samples": 13009
+}

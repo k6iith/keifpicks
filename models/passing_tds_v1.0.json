@@ -1,0 +1,27 @@
+{
+  "model_type": "passing_tds",
+  "target_col": "passing_tds",
+  "version": "1.0",
+  "features": [
+    "is_home",
+    "home_spread",
+    "game_total",
+    "games_played_season",
+    "dynamic_curr_weight",
+    "dynamic_hist_weight",
+    "passing_tds_3wk",
+    "passing_tds_5wk",
+    "passing_tds_career_avg",
+    "passing_tds_weighted_baseline",
+    "passing_yards_3wk",
+    "attempts_3wk",
+    "opp_pass_yards_allowed_rank"
+  ],
+  "mae": 0.92,
+  "rmse": 1.21,
+  "baseline_mae": 0.84,
+  "baseline_rmse": 1.11,
+  "residual_std": 1.16,
+  "trained_at": "2026-09-25T02:37:25.283809",
+  "n_samples": 1957
+}

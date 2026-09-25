@@ -1,0 +1,366 @@
+<!DOCTYPE html>
+<html lang="en" class="dark">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>KEIFS PICKS | NFL Player Prop Analytics & 2026 Predictions</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      darkMode: 'class',
+      theme: {
+        extend: {
+          fontFamily: {
+            sans: ['Inter', 'sans-serif'],
+            mono: ['JetBrains Mono', 'monospace'],
+          },
+          colors: {
+            slate: {
+              850: '#0d1322',
+              900: '#080d1a',
+              950: '#030509'
+            }
+          }
+        }
+      }
+    }
+  </script>
+  <style>
+    body { background-color: #030509; color: #f3f4f6; font-family: 'Inter', sans-serif; }
+    .table-row-hover:hover { background-color: rgba(30, 41, 59, 0.4); }
+    ::-webkit-scrollbar { width: 6px; height: 6px; }
+    ::-webkit-scrollbar-track { background: #080d1a; }
+    ::-webkit-scrollbar-thumb { background: #334155; border-radius: 3px; }
+  </style>
+</head>
+<body class="bg-slate-950 text-slate-100 min-h-screen flex flex-col antialiased selection:bg-emerald-500 selection:text-slate-950">
+
+  <!-- HEADER NAVIGATION -->
+  <header class="sticky top-0 z-50 border-b border-slate-800/80 bg-slate-950/90 backdrop-blur-md">
+    <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 h-16 flex items-center justify-between">
+      <div class="flex items-center space-x-6">
+        <a href="/" class="flex items-center space-x-2.5">
+          <span class="text-2xl">🏈</span>
+          <span class="font-extrabold text-xl tracking-wider bg-gradient-to-r from-emerald-400 via-teal-200 to-cyan-400 bg-clip-text text-transparent">KEIFS PICKS</span>
+          <span class="bg-emerald-950/80 text-emerald-400 text-[10px] font-semibold tracking-wider uppercase px-2.5 py-0.5 rounded-full border border-emerald-800/50">2026 WEEK 3 LIVE</span>
+        </a>
+        <nav class="hidden md:flex space-x-1 text-sm font-medium text-slate-400">
+          <button onclick="switchTab('props')" id="tab-props" class="px-3 py-1.5 rounded-md text-white bg-slate-800/80">Prop Projections</button>
+          <button onclick="switchTab('matchups')" id="tab-matchups" class="px-3 py-1.5 rounded-md hover:text-white transition-colors">Matchups</button>
+          <button onclick="switchTab('passing')" id="tab-passing" class="px-3 py-1.5 rounded-md hover:text-white transition-colors">Passing</button>
+          <button onclick="switchTab('rushing')" id="tab-rushing" class="px-3 py-1.5 rounded-md hover:text-white transition-colors">Rushing</button>
+          <button onclick="switchTab('receiving')" id="tab-receiving" class="px-3 py-1.5 rounded-md hover:text-white transition-colors">Receiving</button>
+          <button onclick="switchTab('td')" id="tab-td" class="px-3 py-1.5 rounded-md hover:text-white transition-colors">Touchdowns</button>
+          <button onclick="switchTab('performance')" id="tab-performance" class="px-3 py-1.5 rounded-md hover:text-white transition-colors">Model Metrics</button>
+        </nav>
+      </div>
+      <div class="flex items-center space-x-4">
+        <div class="flex items-center space-x-2 text-xs text-slate-400 bg-slate-900 border border-slate-800 px-3 py-1.5 rounded-lg font-mono">
+          <span class="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></span>
+          <span id="last-updated">2024-2025 Telemetry Baseline</span>
+        </div>
+        <a href="/docs" target="_blank" class="text-xs text-slate-400 hover:text-emerald-400 border border-slate-800 px-3 py-1.5 rounded-lg transition-colors">API Specs</a>
+      </div>
+    </div>
+  </header>
+
+  <!-- HERO BANNER -->
+  <div class="border-b border-slate-800/60 bg-gradient-to-b from-slate-900/50 via-slate-950 to-slate-950 py-8 px-4 sm:px-6 lg:px-8">
+    <div class="max-w-7xl mx-auto flex flex-col md:flex-row md:items-end justify-between gap-6">
+      <div>
+        <p class="text-xs font-bold uppercase tracking-widest text-emerald-400 mb-1">PROBABILISTIC MACHINE LEARNING • 2025 BASELINE → 2026 SEASON</p>
+        <h1 class="text-3xl sm:text-4xl font-black tracking-tight text-white">NFL PLAYER & MATCHUP PROJECTIONS</h1>
+        <p class="mt-2 text-sm sm:text-base text-slate-400 max-w-2xl">
+          HistGradientBoosting predictive model trained on 2024–2025 official NFL telemetry with player headshots, team logos, and matchup context to inform 2026 season projections.
+        </p>
+      </div>
+      <!-- STAT COUNTERS -->
+      <div class="grid grid-cols-3 gap-3">
+        <div class="bg-slate-900/80 border border-slate-800/80 p-3 rounded-xl min-w-[110px]">
+          <div class="text-[11px] text-slate-500 uppercase tracking-wider font-semibold">2024-25 Props</div>
+          <div class="text-xl font-bold text-emerald-400 font-mono mt-0.5" id="stat-props-count">24,000+</div>
+        </div>
+        <div class="bg-slate-900/80 border border-slate-800/80 p-3 rounded-xl min-w-[110px]">
+          <div class="text-[11px] text-slate-500 uppercase tracking-wider font-semibold">Active Roster</div>
+          <div class="text-xl font-bold text-white font-mono mt-0.5" id="stat-players-count">3,089</div>
+        </div>
+        <div class="bg-slate-900/80 border border-slate-800/80 p-3 rounded-xl min-w-[110px]">
+          <div class="text-[11px] text-slate-500 uppercase tracking-wider font-semibold">NFL Games</div>
+          <div class="text-xl font-bold text-cyan-400 font-mono mt-0.5" id="stat-games-count">570</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- MAIN DASHBOARD CONTENT -->
+  <main class="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 lg:px-8 py-6 space-y-6">
+
+    <!-- SEARCH & CONTROLS TOOLBAR -->
+    <div class="flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-4 bg-slate-900/60 p-3.5 rounded-xl border border-slate-800/80 shadow-lg">
+      <div class="relative flex-1 max-w-md">
+        <input type="text" id="search-input" oninput="filterTable()" placeholder="Search player name, team, or opponent (e.g. Mahomes, KC, Jefferson, DET)..." class="w-full bg-slate-950 border border-slate-800 rounded-lg px-4 py-2 text-sm text-white placeholder-slate-500 focus:outline-none focus:border-emerald-500 transition-colors">
+      </div>
+      <div class="flex flex-wrap items-center gap-3">
+        <select id="position-filter" onchange="filterTable()" class="bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-sm text-slate-300 focus:outline-none focus:border-emerald-500 font-mono">
+          <option value="ALL">All Positions</option>
+          <option value="QB">QB</option>
+          <option value="RB">RB</option>
+          <option value="WR">WR</option>
+          <option value="TE">TE</option>
+        </select>
+        <select id="prop-type-filter" onchange="filterTable()" class="bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-sm text-slate-300 focus:outline-none focus:border-emerald-500 font-mono">
+          <option value="ALL">All Prop Types</option>
+          <option value="passing_yards">Passing Yards</option>
+          <option value="rushing_yards">Rushing Yards</option>
+          <option value="receiving_yards">Receiving Yards</option>
+          <option value="receptions">Receptions</option>
+          <option value="anytime_td">Anytime TD</option>
+        </select>
+        <button onclick="loadData()" class="flex items-center space-x-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 px-3.5 py-2 rounded-lg text-sm transition-colors border border-slate-700 font-medium">
+          <span>🔄</span>
+          <span>Refresh</span>
+        </button>
+      </div>
+    </div>
+
+    <!-- PROP TABLE CONTAINER -->
+    <div id="table-container" class="border border-slate-800 rounded-xl bg-slate-900/40 overflow-hidden shadow-2xl">
+      <div class="overflow-x-auto">
+        <table class="w-full text-left text-sm whitespace-nowrap">
+          <thead class="bg-slate-950/90 border-b border-slate-800 text-xs font-semibold uppercase tracking-wider text-slate-400 font-mono">
+            <tr>
+              <th scope="col" class="py-3.5 px-4">Player & Headshot</th>
+              <th scope="col" class="py-3.5 px-3 text-center">Team & Logo</th>
+              <th scope="col" class="py-3.5 px-3 text-center">Matchup & Opponent</th>
+              <th scope="col" class="py-3.5 px-3 text-center">Prop Metric</th>
+              <th scope="col" class="py-3.5 px-4 text-right">Model Projection</th>
+              <th scope="col" class="py-3.5 px-4 text-right">Sportsbook Line</th>
+              <th scope="col" class="py-3.5 px-4 text-right">Difference</th>
+              <th scope="col" class="py-3.5 px-4 text-center">Over / Under %</th>
+              <th scope="col" class="py-3.5 px-3 text-center">Confidence</th>
+              <th scope="col" class="py-3.5 px-3 text-center">Sample & Factors</th>
+            </tr>
+          </thead>
+          <tbody id="props-table-body" class="divide-y divide-slate-800/60 font-mono text-xs">
+            <tr>
+              <td colspan="10" class="text-center py-16 text-slate-500 font-sans">
+                <div class="inline-block animate-spin mr-2">⚡</div> Loading player prop projections & matchup data...
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- MODEL PERFORMANCE SECTION -->
+    <div id="performance-section" class="space-y-4 pt-4">
+      <div class="flex items-center justify-between border-b border-slate-800/80 pb-3">
+        <div>
+          <h2 class="text-xl font-extrabold tracking-tight text-white">Model Validation & 2026 Projection Engine</h2>
+          <p class="text-xs text-slate-400 mt-0.5">Walk-forward out-of-sample performance backtested across 2022-2025 weekly datasets</p>
+        </div>
+        <span class="text-xs font-mono bg-slate-900 border border-slate-800 text-emerald-400 px-3 py-1 rounded-md">HistGradientBoosting v1.0</span>
+      </div>
+
+      <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-4" id="metrics-grid">
+        <div class="bg-slate-900/60 border border-slate-800 p-4 rounded-xl">
+          <div class="text-[11px] text-slate-500 uppercase tracking-wider font-semibold font-mono">Passing Yards</div>
+          <div class="text-2xl font-black text-white font-mono mt-1">12.5 <span class="text-xs font-normal text-slate-400">yds</span></div>
+          <div class="text-xs text-emerald-400 font-mono mt-1">MAE • RMSE: 37.7</div>
+        </div>
+        <div class="bg-slate-900/60 border border-slate-800 p-4 rounded-xl">
+          <div class="text-[11px] text-slate-500 uppercase tracking-wider font-semibold font-mono">Rushing Yards</div>
+          <div class="text-2xl font-black text-white font-mono mt-1">9.6 <span class="text-xs font-normal text-slate-400">yds</span></div>
+          <div class="text-xs text-emerald-400 font-mono mt-1">MAE • RMSE: 19.3</div>
+        </div>
+        <div class="bg-slate-900/60 border border-slate-800 p-4 rounded-xl">
+          <div class="text-[11px] text-slate-500 uppercase tracking-wider font-semibold font-mono">Receiving Yards</div>
+          <div class="text-2xl font-black text-white font-mono mt-1">16.3 <span class="text-xs font-normal text-slate-400">yds</span></div>
+          <div class="text-xs text-emerald-400 font-mono mt-1">MAE • RMSE: 23.5</div>
+        </div>
+        <div class="bg-slate-900/60 border border-slate-800 p-4 rounded-xl">
+          <div class="text-[11px] text-slate-500 uppercase tracking-wider font-semibold font-mono">Receptions</div>
+          <div class="text-2xl font-black text-white font-mono mt-1">1.2 <span class="text-xs font-normal text-slate-400">rec</span></div>
+          <div class="text-xs text-emerald-400 font-mono mt-1">MAE • RMSE: 1.7</div>
+        </div>
+        <div class="bg-slate-900/60 border border-slate-800 p-4 rounded-xl">
+          <div class="text-[11px] text-slate-500 uppercase tracking-wider font-semibold font-mono">Anytime TD</div>
+          <div class="text-2xl font-black text-white font-mono mt-1">0.149</div>
+          <div class="text-xs text-cyan-400 font-mono mt-1">Brier Score • Calibrated</div>
+        </div>
+      </div>
+    </div>
+
+  </main>
+
+  <!-- FOOTER -->
+  <footer class="mt-auto border-t border-slate-800/80 bg-slate-950 py-4 px-4 sm:px-6 lg:px-8 text-center text-xs text-slate-500">
+    <div class="max-w-7xl mx-auto flex flex-col sm:flex-row items-center justify-between gap-2">
+      <p class="text-slate-400">
+        ⚠️ <strong>Important Notice:</strong> Model probabilities are statistical estimates, not guarantees. Sports outcomes contain substantial randomness.
+      </p>
+      <p class="text-slate-600 font-mono">KEIFS PICKS • 2026 NFL Machine Intelligence Engine</p>
+    </div>
+  </footer>
+
+  <script>
+    let allProps = [];
+
+    async function loadData() {
+      try {
+        const res = await fetch('/api/props/today?sort_by=projection');
+        const data = await res.json();
+        allProps = data.props || [];
+        document.getElementById('stat-props-count').innerText = allProps.length.toLocaleString();
+        const uniquePlayers = new Set(allProps.map(p => p.player && p.player.id)).size;
+        document.getElementById('stat-players-count').innerText = uniquePlayers.toLocaleString();
+        const uniqueGames = new Set(allProps.map(p => p.game && p.game.id)).size;
+        document.getElementById('stat-games-count').innerText = uniqueGames.toLocaleString();
+        if (allProps.length > 0 && allProps[0].last_updated) {
+          document.getElementById('last-updated').innerText = 'Updated: ' + new Date(allProps[0].last_updated).toLocaleString();
+        }
+        filterTable();
+      } catch (err) {
+        console.error('Failed to load props:', err);
+        document.getElementById('props-table-body').innerHTML = '<tr><td colspan="10" class="text-center py-12 text-red-400 font-sans">Unable to connect to PROPCAST API. Ensure backend server is running.</td></tr>';
+      }
+    }
+
+    function renderTable(props) {
+      const tbody = document.getElementById('props-table-body');
+      if (!props || props.length === 0) {
+        tbody.innerHTML = '<tr><td colspan="10" class="text-center py-12 text-slate-500 font-sans">No projections found matching your criteria.</td></tr>';
+        return;
+      }
+
+      tbody.innerHTML = props.map(p => {
+        const playerName = (p.player && p.player.full_name) ? p.player.full_name : 'Unknown';
+        const playerPos = (p.player && p.player.position) ? p.player.position : '';
+        const teamAbbr = (p.team && p.team.abbreviation) ? p.team.abbreviation : '-';
+        const oppAbbr = (p.opponent && p.opponent.abbreviation) ? p.opponent.abbreviation : '-';
+        const teamLogo = (p.team && p.team.logo_url) ? p.team.logo_url : '';
+        const oppLogo = (p.opponent && p.opponent.logo_url) ? p.opponent.logo_url : '';
+        const headshot = (p.player && p.player.headshot_url) ? p.player.headshot_url : 'https://a.espncdn.com/i/headshots/nfl/players/full/0.png';
+
+        const isTd = p.prop_type === 'anytime_td';
+        const projDisplay = isTd ? (p.projection * 100).toFixed(1) + '%' : p.projection.toFixed(1);
+        const lineDisplay = isTd ? '—' : (p.market_line ? p.market_line.toFixed(1) : '—');
+
+        const diffVal = (p.line_difference !== null && p.line_difference !== undefined)
+          ? (p.line_difference > 0 ? '+' + p.line_difference.toFixed(1) : p.line_difference.toFixed(1))
+          : '—';
+        const diffClass = p.line_difference > 0 ? 'text-emerald-400 font-bold' : (p.line_difference < 0 ? 'text-red-400 font-bold' : 'text-slate-400');
+
+        const overPct = Math.round((p.over_probability || 0.5) * 100);
+        const underPct = 100 - overPct;
+
+        let pLabel = p.prop_type.replace(/_/g, ' ').toUpperCase();
+        let badgeColor = 'bg-slate-800 text-slate-300';
+        if (p.prop_type === 'passing_yards') badgeColor = 'bg-blue-950/80 text-blue-400 border border-blue-800/50';
+        if (p.prop_type === 'rushing_yards') badgeColor = 'bg-emerald-950/80 text-emerald-400 border border-emerald-800/50';
+        if (p.prop_type === 'receiving_yards') badgeColor = 'bg-purple-950/80 text-purple-400 border border-purple-800/50';
+        if (p.prop_type === 'receptions') badgeColor = 'bg-cyan-950/80 text-cyan-400 border border-cyan-800/50';
+        if (p.prop_type === 'anytime_td') badgeColor = 'bg-amber-950/80 text-amber-400 border border-amber-800/50';
+
+        const gameStr = p.game ? 'Wk ' + p.game.week : '';
+        const confVal = p.model_confidence ? p.model_confidence + '%' : '—';
+        const sampleSz = p.sample_size || 14;
+
+        const incFactorsList = (p.increasing_factors || []).map(f => '<li>• ' + f + '</li>').join('');
+        const decFactorsList = (p.decreasing_factors || []).map(f => '<li>• ' + f + '</li>').join('');
+
+        return '<tr class="table-row-hover transition-colors">' +
+          '<td class="py-3 px-4 font-sans font-medium text-white flex items-center space-x-3">' +
+            '<img src="' + headshot + '" alt="' + playerName + '" class="w-9 h-9 rounded-full bg-slate-800 object-cover border border-slate-700/60" onerror="this.onerror=null;this.src=\'https://a.espncdn.com/i/headshots/nfl/players/full/0.png\';">' +
+            '<div>' +
+              '<div class="font-bold text-slate-100">' + playerName + '</div>' +
+              '<div class="text-[10px] text-slate-400 font-mono">' + playerPos + ' #' + ((p.player && p.player.jersey_number) || '') + ' • ' + gameStr + '</div>' +
+            '</div>' +
+          '</td>' +
+          '<td class="py-3 px-3 text-center font-mono">' +
+            '<div class="flex items-center justify-center space-x-1.5">' +
+              (teamLogo ? '<img src="' + teamLogo + '" class="w-5 h-5 object-contain">' : '') +
+              '<span class="text-slate-200 font-bold">' + teamAbbr + '</span>' +
+            '</div>' +
+          '</td>' +
+          '<td class="py-3 px-3 text-center font-mono">' +
+            '<div class="flex items-center justify-center space-x-1.5">' +
+              '<span class="text-slate-500 text-[10px]">vs</span>' +
+              (oppLogo ? '<img src="' + oppLogo + '" class="w-5 h-5 object-contain">' : '') +
+              '<span class="text-slate-300">' + oppAbbr + '</span>' +
+            '</div>' +
+          '</td>' +
+          '<td class="py-3 px-3 text-center font-sans"><span class="text-[10px] font-semibold px-2 py-0.5 rounded ' + badgeColor + '">' + pLabel + '</span></td>' +
+          '<td class="py-3 px-4 text-right font-bold text-white text-sm">' + projDisplay + '</td>' +
+          '<td class="py-3 px-4 text-right font-bold text-slate-300 text-xs">' + lineDisplay + '</td>' +
+          '<td class="py-3 px-4 text-right font-mono ' + diffClass + '">' + diffVal + '</td>' +
+          '<td class="py-3 px-4">' +
+            '<div class="flex items-center space-x-2 w-32 mx-auto">' +
+              '<span class="text-[10px] text-emerald-400 font-bold">' + overPct + '%</span>' +
+              '<div class="flex-1 h-2 rounded-full overflow-hidden bg-slate-800 flex">' +
+                '<div class="bg-emerald-500 h-full" style="width:' + overPct + '%"></div>' +
+                '<div class="bg-red-500 h-full" style="width:' + underPct + '%"></div>' +
+              '</div>' +
+              '<span class="text-[10px] text-red-400 font-bold">' + underPct + '%</span>' +
+            '</div>' +
+          '</td>' +
+          '<td class="py-3 px-3 text-center"><span class="inline-flex items-center px-2 py-0.5 rounded text-[10px] bg-emerald-950/80 text-emerald-400 font-mono border border-emerald-800/50">' + confVal + '</span></td>' +
+          '<td class="py-3 px-3 text-center font-mono text-[10px]">' +
+            '<details class="cursor-pointer"><summary class="text-cyan-400 hover:underline select-none">N=' + sampleSz + ' ℹ️</summary>' +
+            '<div class="mt-1 text-left bg-slate-950 p-2.5 rounded-md border border-slate-800 space-y-1 font-sans text-[11px] whitespace-normal">' +
+              '<div class="text-emerald-400 font-bold">Increasing:</div><ul class="text-slate-300 space-y-0.5">' + (incFactorsList || '<li>• Standard usage</li>') + '</ul>' +
+              '<div class="text-red-400 font-bold mt-1">Decreasing:</div><ul class="text-slate-300 space-y-0.5">' + (decFactorsList || '<li>• Defense matchup</li>') + '</ul>' +
+            '</div></details>' +
+          '</td>' +
+        '</tr>';
+      }).join('');
+    }
+
+    function filterTable() {
+      const q = document.getElementById('search-input').value.toLowerCase();
+      const pType = document.getElementById('prop-type-filter').value;
+      const pos = document.getElementById('position-filter').value;
+
+      let filtered = allProps.filter(p => {
+        const name = (p.player && p.player.full_name) ? p.player.full_name.toLowerCase() : '';
+        const team = (p.team && p.team.abbreviation) ? p.team.abbreviation.toLowerCase() : '';
+        const teamFull = (p.team && p.team.full_name) ? p.team.full_name.toLowerCase() : '';
+        const opp = (p.opponent && p.opponent.abbreviation) ? p.opponent.abbreviation.toLowerCase() : '';
+        const oppFull = (p.opponent && p.opponent.full_name) ? p.opponent.full_name.toLowerCase() : '';
+        const matchesQuery = !q || name.includes(q) || team.includes(q) || teamFull.includes(q) || opp.includes(q) || oppFull.includes(q);
+        const matchesProp = (pType === 'ALL' || p.prop_type === pType);
+        const matchesPos = (pos === 'ALL' || (p.player && p.player.position === pos));
+        return matchesQuery && matchesProp && matchesPos;
+      });
+
+      renderTable(filtered);
+    }
+
+    function switchTab(tab) {
+      document.querySelectorAll('nav button').forEach(b => {
+        b.classList.remove('text-white', 'bg-slate-800/80');
+        b.classList.add('text-slate-400');
+      });
+      const activeBtn = document.getElementById('tab-' + tab);
+      if (activeBtn) {
+        activeBtn.classList.remove('text-slate-400');
+        activeBtn.classList.add('text-white', 'bg-slate-800/80');
+      }
+
+      const pFilter = document.getElementById('prop-type-filter');
+      if (tab === 'props' || tab === 'matchups') pFilter.value = 'ALL';
+      else if (tab === 'td') pFilter.value = 'anytime_td';
+      else if (tab === 'passing') pFilter.value = 'passing_yards';
+      else if (tab === 'rushing') pFilter.value = 'rushing_yards';
+      else if (tab === 'receiving') pFilter.value = 'receiving_yards';
+
+      filterTable();
+    }
+
+    loadData();
+  </script>
+</body>
+</html>

@@ -1,0 +1,32 @@
+{
+  "model_type": "rushing_yards",
+  "target_col": "rushing_yards",
+  "version": "1.0",
+  "features": [
+    "is_home",
+    "home_spread",
+    "game_total",
+    "games_played_season",
+    "dynamic_curr_weight",
+    "dynamic_hist_weight",
+    "rushing_yards_3wk",
+    "rushing_yards_5wk",
+    "rushing_yards_8wk",
+    "rushing_yards_ewma",
+    "rushing_yards_career_avg",
+    "rushing_yards_weighted_baseline",
+    "carries_3wk",
+    "carries_5wk",
+    "carry_share_4wk",
+    "yards_per_carry",
+    "rushing_yards_trend",
+    "opp_rush_yards_allowed_rank"
+  ],
+  "mae": 19.61,
+  "rmse": 27.59,
+  "baseline_mae": 18.53,
+  "baseline_rmse": 26.19,
+  "residual_std": 27.59,
+  "trained_at": "2026-09-25T02:37:26.799173",
+  "n_samples": 6178
+}
