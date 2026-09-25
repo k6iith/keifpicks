@@ -307,13 +307,15 @@ def add_matchup_features(df: pd.DataFrame, db: Session) -> pd.DataFrame:
     for c in stat_targets:
         def_df[f"{c}_ytd"] = grp[c].transform(lambda s: s.shift(1).cumsum())
 
-    def rank_defense(grp_df: pd.DataFrame, col: str, out_col: str) -> pd.DataFrame:
-        grp_df[out_col] = grp_df[col].rank(ascending=True, method="average", na_option="keep")
-        return grp_df
-
+    # Rank each defense within its (season, week) group. Using groupby(...).apply()
+    # here is fragile across pandas versions: pandas 3.x excludes the grouping
+    # columns ("season", "week") from what's passed into the applied function by
+    # default, so a value reassigned from the result loses those columns on the
+    # very next loop iteration (KeyError: 'season'). A groupby(...)[col].rank(...)
+    # transform avoids that entirely and works the same on pandas 2.x and 3.x.
     for c, out_c in zip(stat_targets, matchup_cols):
-        def_df = def_df.groupby(["season", "week"], group_keys=False).apply(
-            lambda g, c=c, out_c=out_c: rank_defense(g, f"{c}_ytd", out_c)
+        def_df[out_c] = def_df.groupby(["season", "week"])[f"{c}_ytd"].rank(
+            ascending=True, method="average", na_option="keep"
         )
 
     def_slim = def_df[["defense_team", "season", "week"] + matchup_cols].rename(
