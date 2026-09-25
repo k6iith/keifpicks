@@ -228,6 +228,8 @@ class PropCard(BaseModel):
     data_quality_score: Optional[float] = Field(
         None, description="0-1 score reflecting data freshness and completeness"
     )
+    is_locked: bool = Field(False, description="Whether this prop is locked behind a paywall")
+    tier: str = Field("free", description="Prop tier: free, pro, or vip")
     last_updated: Optional[datetime] = None
     model_version: Optional[str] = None
     disclaimer: str = DISCLAIMER
