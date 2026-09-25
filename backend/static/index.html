@@ -246,7 +246,8 @@
         const headshot = (p.player && p.player.headshot_url) ? p.player.headshot_url : 'https://a.espncdn.com/i/headshots/nfl/players/full/0.png';
 
         const isTd = p.prop_type === 'anytime_td';
-        const projDisplay = isTd ? (p.projection * 100).toFixed(1) + '%' : p.projection.toFixed(1);
+        const proj = p.projection || 0;
+        const projDisplay = isTd ? (proj * 100).toFixed(1) + '%' : proj.toFixed(1);
         const lineDisplay = isTd ? '—' : (p.market_line ? p.market_line.toFixed(1) : '—');
 
         const diffVal = (p.line_difference !== null && p.line_difference !== undefined)
@@ -356,6 +357,15 @@
       else if (tab === 'passing') pFilter.value = 'passing_yards';
       else if (tab === 'rushing') pFilter.value = 'rushing_yards';
       else if (tab === 'receiving') pFilter.value = 'receiving_yards';
+
+      // For receiving tab, show both receiving_yards and receptions
+      if (tab === 'receiving') {
+        let filtered = allProps.filter(p => {
+          return p.prop_type === 'receiving_yards' || p.prop_type === 'receptions';
+        });
+        renderTable(filtered);
+        return;
+      }
 
       filterTable();
     }
