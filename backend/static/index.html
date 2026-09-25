@@ -114,7 +114,9 @@
         <select id="prop-type-filter" onchange="filterTable()" class="bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-sm text-slate-300 focus:outline-none focus:border-emerald-500 font-mono">
           <option value="ALL">All Prop Types</option>
           <option value="passing_yards">Passing Yards</option>
+          <option value="passing_tds">Passing TDs</option>
           <option value="rushing_yards">Rushing Yards</option>
+          <option value="rushing_attempts">Rushing Attempts</option>
           <option value="receiving_yards">Receiving Yards</option>
           <option value="receptions">Receptions</option>
           <option value="anytime_td">Anytime TD</option>
@@ -211,7 +213,7 @@
 
     async function loadData() {
       try {
-        const res = await fetch('/api/props/today?sort_by=projection');
+        const res = await fetch('/api/props/today?sort_by=projection&limit=2000');
         const data = await res.json();
         allProps = data.props || [];
         document.getElementById('stat-props-count').innerText = allProps.length.toLocaleString();
@@ -261,7 +263,9 @@
         let pLabel = p.prop_type.replace(/_/g, ' ').toUpperCase();
         let badgeColor = 'bg-slate-800 text-slate-300';
         if (p.prop_type === 'passing_yards') badgeColor = 'bg-blue-950/80 text-blue-400 border border-blue-800/50';
+        if (p.prop_type === 'passing_tds') badgeColor = 'bg-indigo-950/80 text-indigo-400 border border-indigo-800/50';
         if (p.prop_type === 'rushing_yards') badgeColor = 'bg-emerald-950/80 text-emerald-400 border border-emerald-800/50';
+        if (p.prop_type === 'rushing_attempts') badgeColor = 'bg-lime-950/80 text-lime-400 border border-lime-800/50';
         if (p.prop_type === 'receiving_yards') badgeColor = 'bg-purple-950/80 text-purple-400 border border-purple-800/50';
         if (p.prop_type === 'receptions') badgeColor = 'bg-cyan-950/80 text-cyan-400 border border-cyan-800/50';
         if (p.prop_type === 'anytime_td') badgeColor = 'bg-amber-950/80 text-amber-400 border border-amber-800/50';
@@ -358,10 +362,24 @@
       else if (tab === 'rushing') pFilter.value = 'rushing_yards';
       else if (tab === 'receiving') pFilter.value = 'receiving_yards';
 
-      // For receiving tab, show both receiving_yards and receptions
+      // Some tabs group together a "yards" prop with its companion volume/TD prop
       if (tab === 'receiving') {
         let filtered = allProps.filter(p => {
           return p.prop_type === 'receiving_yards' || p.prop_type === 'receptions';
+        });
+        renderTable(filtered);
+        return;
+      }
+      if (tab === 'passing') {
+        let filtered = allProps.filter(p => {
+          return p.prop_type === 'passing_yards' || p.prop_type === 'passing_tds';
+        });
+        renderTable(filtered);
+        return;
+      }
+      if (tab === 'rushing') {
+        let filtered = allProps.filter(p => {
+          return p.prop_type === 'rushing_yards' || p.prop_type === 'rushing_attempts';
         });
         renderTable(filtered);
         return;

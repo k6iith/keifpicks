@@ -264,7 +264,7 @@ def _get_today_game_ids(db: Session) -> List[int]:
 def get_props_today(
     prop_type: Optional[str] = Query(None),
     sort_by: str = Query("edge", description="Sort field: projection, edge, diff"),
-    limit: int = Query(500),
+    limit: int = Query(2000, le=5000),
     db: Session = Depends(get_db),
 ):
     gids = _get_today_game_ids(db)
