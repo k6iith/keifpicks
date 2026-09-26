@@ -488,6 +488,13 @@ def build_current_week_features(db: Session, season: int, week: int) -> pd.DataF
           AND g.season = :season AND g.week  = :week
           AND p.position IN ('QB','WR','TE','RB','K')
           AND p.status = 'ACT'
+          AND (
+              (p.position = 'QB' AND r.depth_chart_rank <= 1) OR
+              (p.position = 'RB' AND r.depth_chart_rank <= 2) OR
+              (p.position = 'WR' AND r.depth_chart_rank <= 3) OR
+              (p.position = 'TE' AND r.depth_chart_rank <= 2) OR
+              (p.position = 'K'  AND r.depth_chart_rank <= 1)
+          )
     """)
 
     try:
