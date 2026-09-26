@@ -177,7 +177,43 @@ def add_rolling_usage_features(df: pd.DataFrame) -> pd.DataFrame:
 
     def _ewma_recency(series: pd.Series, alpha: float = 0.70) -> pd.Series:
         """Strong exponential recency decay weighting: recent weeks contribute overwhelmingly."""
-        return series.shift(1).ewm(alpha=alpha, min_periods=1).mean()
+        return series.shift(1).ewm(alpha=alpha, min_periods=1, ignore_na=True).mean()
+
+    # Some games aren't representative of a player's real form at all — an
+    # injury that pulls them after a handful of snaps, a blowout that ends
+    # their workload early. A rolling "recent form" average that treats a
+    # 5-attempt injury-shortened outing the same as a normal 30-attempt
+    # start gets dragged hard by something that isn't real signal (e.g. a QB
+    # hurt on the first drive throws for 18 yards on 5 attempts, and the
+    # model reads "his form collapsed" instead of "he barely played"). Flag
+    # games where a player's usage fell well below their own established
+    # workload and exclude just those from the recency windows (3wk/5wk/8wk/
+    # ewma) below — career and season averages are left untouched since
+    # those are meant to reflect everything that happened, blips included.
+    _USAGE_COL_FOR_STAT = {
+        "passing_yards": "attempts", "passing_tds": "attempts", "completions": "attempts",
+        "rushing_yards": "carries", "rushing_tds": "carries",
+        "receiving_yards": "targets", "receiving_tds": "targets", "receptions": "targets",
+        "air_yards": "targets", "yards_after_catch": "targets",
+        "carries": "carries", "attempts": "attempts", "targets": "targets",
+    }
+
+    def _usage_baseline(series: pd.Series) -> pd.Series:
+        # Prior-game expanding median of the player's own usage, so the
+        # threshold adapts to their normal workload instead of a league-wide
+        # number that wouldn't mean the same thing for a starter vs. a
+        # committee back.
+        return series.shift(1).expanding(min_periods=3).median()
+
+    diminished_masks: dict[str, pd.Series] = {}
+    for ucol in set(_USAGE_COL_FOR_STAT.values()):
+        if ucol not in df.columns:
+            continue
+        baseline = player_grp[ucol].transform(_usage_baseline)
+        # Only flag once we actually have an established baseline (3+ prior
+        # games) — otherwise every player's early-career games would get
+        # flagged for lack of comparison.
+        diminished_masks[ucol] = baseline.notna() & (df[ucol] < 0.35 * baseline)
 
     tracked_stats = [
         "passing_yards", "rushing_yards", "receiving_yards", "receptions",
@@ -187,10 +223,15 @@ def add_rolling_usage_features(df: pd.DataFrame) -> pd.DataFrame:
 
     for stat in tracked_stats:
         if stat in df.columns:
-            df[f"{stat}_3wk"] = player_grp[stat].transform(lambda s: _rollN(s, 3))
-            df[f"{stat}_5wk"] = player_grp[stat].transform(lambda s: _rollN(s, 5))
-            df[f"{stat}_8wk"] = player_grp[stat].transform(lambda s: _rollN(s, 8))
-            df[f"{stat}_ewma"] = player_grp[stat].transform(_ewma_recency)
+            usage_col = _USAGE_COL_FOR_STAT.get(stat)
+            mask = diminished_masks.get(usage_col) if usage_col else None
+            recency_series = df[stat].where(~mask, np.nan) if mask is not None else df[stat]
+            recency_grp = recency_series.groupby(df["player_id"], sort=False)
+
+            df[f"{stat}_3wk"] = recency_grp.transform(lambda s: _rollN(s, 3))
+            df[f"{stat}_5wk"] = recency_grp.transform(lambda s: _rollN(s, 5))
+            df[f"{stat}_8wk"] = recency_grp.transform(lambda s: _rollN(s, 8))
+            df[f"{stat}_ewma"] = recency_grp.transform(_ewma_recency)
             df[f"{stat}_career_avg"] = player_grp[stat].transform(_career_mean)
             df[f"{stat}_career_std"] = player_grp[stat].transform(_career_std)
             df[f"season_avg_{stat}"] = player_season_grp[stat].transform(_season_mean)
@@ -446,7 +487,19 @@ def build_current_week_features(db: Session, season: int, week: int) -> pd.DataF
     Build features for upcoming week players using all prior completed historical games.
     """
     prior_seasons = list(range(2022, season))
-    df_hist = build_player_game_observations(db, prior_seasons)
+    # Include the current season's already-completed weeks in "history" too —
+    # otherwise a week 3 prediction, say, would ignore that player's actual
+    # weeks 1-2 form this season and fall back on however their PREVIOUS
+    # season happened to end, which can be a year+ stale and badly misleading
+    # (e.g. treating a player's final-week-of-last-season hot streak as their
+    # current form). player_game_stats only ever has rows for games that have
+    # actually been played, so this can't leak future/unplayed games — but we
+    # still explicitly exclude the target week (and anything at/after it) in
+    # case that week's stats have already landed (e.g. a Thursday game).
+    df_hist = build_player_game_observations(db, prior_seasons + [season])
+    df_hist = df_hist[
+        ~((df_hist["season"] == season) & (df_hist["week"] >= week))
+    ].reset_index(drop=True)
 
     upcoming_sql = text("""
         SELECT
