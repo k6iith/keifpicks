@@ -14,7 +14,8 @@ from backend.db.database import SessionLocal
 from backend.ingestion.injuries import ingest_injuries
 from backend.ingestion.weather import ingest_weather_for_upcoming_games
 from backend.ingestion.odds import ingest_market_lines
-from backend.ingestion.nfl_data import ingest_schedule, ingest_players
+from backend.ingestion.nfl_data import ingest_schedule, ingest_players, ingest_player_stats
+from backend.ingestion.espn_sync import sync_espn_rosters_and_depth_charts
 from backend.models.performance import score_completed_games
 
 logger = logging.getLogger(__name__)
@@ -26,10 +27,15 @@ def sync_hourly_rosters(db: SessionLocal):
     """Sync rosters, trade moves, and depth charts from official NFL telemetry."""
     try:
         import nfl_data_py as nfl
+        from datetime import datetime
         from backend.db.models import Player, Team, Roster
-        
+
+        # Was hardcoded to [2024], so every hourly sync kept re-applying a
+        # frozen 2024 roster snapshot no matter what year it actually ran in.
+        current_year = datetime.utcnow().year
+
         teams = {t.abbreviation: t.id for t in db.query(Team).all()}
-        df = nfl.import_seasonal_rosters([2024])
+        df = nfl.import_seasonal_rosters([current_year])
         for _, row in df.iterrows():
             pid = row.get("player_id")
             if not pid:
@@ -71,7 +77,15 @@ def run_hourly_updates():
 
 
 def run_weekly_refresh():
-    """Execute weekly schedule and roster refresh."""
+    """
+    Execute weekly schedule, roster, and player-stats refresh.
+
+    Previously this only refreshed the schedule and player list — it never
+    actually pulled the prior week's box-score stats into player_game_stats,
+    so every player's "recent form" features silently stopped updating after
+    the last season that got backfilled by hand. ingest_player_stats() is
+    what actually keeps that table current, so it belongs here too.
+    """
     logger.info("⏰ Starting scheduled weekly refresh...")
     db = SessionLocal()
     try:
@@ -79,10 +93,21 @@ def run_weekly_refresh():
         year = datetime.utcnow().year
         ingest_schedule(db, [year])
         ingest_players(db, year)
+        stats_count = ingest_player_stats(db, [year])
+        logger.info("Weekly player stats refresh: %d records", stats_count)
     except Exception as exc:
         logger.error("Error during weekly refresh: %s", exc)
     finally:
         db.close()
+
+    # Depth charts + prediction regeneration: separate step (manages its own
+    # DB session/commits) so a failure here doesn't roll back the ingestion
+    # above. This also used to only ever run when someone manually triggered
+    # an ESPN sync — predictions never actually refreshed on their own.
+    try:
+        sync_espn_rosters_and_depth_charts()
+    except Exception as exc:
+        logger.error("Error during weekly depth-chart/prediction refresh: %s", exc)
 
 
 def run_scoring_job():

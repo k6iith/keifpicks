@@ -4,11 +4,20 @@ from datetime import datetime
 from backend.db.database import SessionLocal
 from backend.db.models import Player, Team, Roster, Game, Prediction
 from backend.ingestion.name_utils import find_player_by_name
+from backend.ingestion.nfl_data import _current_season, _current_nfl_week
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("espn_sync")
 
 def sync_espn_rosters_and_depth_charts():
+    # This whole function used to hardcode season=2026, week=3 in five
+    # places, so it would keep rebuilding week 3's roster and regenerating
+    # week 3 predictions forever — never advancing to week 4, 5, etc. once
+    # the actual current week moved past it. Compute it the same way the
+    # rest of the ingestion code does instead.
+    season = _current_season()
+    week = _current_nfl_week(season)
+
     db = SessionLocal()
     try:
         # Map DB teams
@@ -18,16 +27,16 @@ def sync_espn_rosters_and_depth_charts():
             'WSH': 'WAS',
             'LAR': 'LA',
         }
-        
+
         # 1. Fetch all NFL teams from ESPN
         teams_url = "https://site.api.espn.com/apis/site/v2/sports/football/nfl/teams"
         resp = httpx.get(teams_url, timeout=15).json()
         espn_teams = resp['sports'][0]['leagues'][0]['teams']
-        
+
         logger.info(f"Fetched {len(espn_teams)} teams from ESPN.")
-        
-        # Clear existing rosters for 2026 week 3 to rebuild clean active starter depth chart
-        db.query(Roster).filter(Roster.season == 2026, Roster.week == 3).delete()
+
+        # Clear existing rosters for the current season/week to rebuild a clean active starter depth chart
+        db.query(Roster).filter(Roster.season == season, Roster.week == week).delete()
         db.commit()
 
         # Mark all players CUT/INA by default, will activate those found on ESPN active rosters
@@ -99,8 +108,8 @@ def sync_espn_rosters_and_depth_charts():
                                 roster_entry = Roster(
                                     player_id=player.id,
                                     team_id=db_team.id,
-                                    season=2026,
-                                    week=3,
+                                    season=season,
+                                    week=week,
                                     depth_chart_position=norm_pos,
                                     depth_chart_rank=rank_idx
                                 )
@@ -138,24 +147,24 @@ def sync_espn_rosters_and_depth_charts():
         db.commit()
         logger.info(f"ESPN sync finished: {len(active_player_ids)} active skill players verified.")
         
-        # Now regenerate Week 3 predictions based exclusively on ML model pipeline
-        logger.info("Generating statistical ML predictions for 2026 Week 3 starters...")
+        # Now regenerate this week's predictions based exclusively on ML model pipeline
+        logger.info(f"Generating statistical ML predictions for {season} Week {week} starters...")
         try:
             from backend.features.builder import build_current_week_features
             from backend.models.predictor import generate_predictions_for_features
-            
-            w3_features = build_current_week_features(db, season=2026, week=3)
-            if not w3_features.empty:
+
+            week_features = build_current_week_features(db, season=season, week=week)
+            if not week_features.empty:
                 # Mark old predictions non-current
-                w3_games = db.query(Game).filter(Game.season == 2026, Game.week == 3).all()
-                w3_gids = [g.id for g in w3_games]
-                db.query(Prediction).filter(Prediction.game_id.in_(w3_gids)).update({"is_current": False})
+                week_games = db.query(Game).filter(Game.season == season, Game.week == week).all()
+                week_gids = [g.id for g in week_games]
+                db.query(Prediction).filter(Prediction.game_id.in_(week_gids)).update({"is_current": False})
                 db.commit()
-                
-                preds_created = generate_predictions_for_features(db, w3_features)
-                logger.info(f"Generated {preds_created} statistical ML predictions for 2026 Week 3.")
+
+                preds_created = generate_predictions_for_features(db, week_features)
+                logger.info(f"Generated {preds_created} statistical ML predictions for {season} Week {week}.")
             else:
-                logger.warning("No Week 3 features generated for active starters.")
+                logger.warning(f"No Week {week} features generated for active starters.")
         except Exception as e:
             logger.exception(f"Failed to generate ML predictions after ESPN sync: {e}")
             

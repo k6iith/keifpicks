@@ -499,6 +499,50 @@ _WEEKLY_COLUMNS = [
     "snap_pct", "fantasy_points_ppr",
 ]
 
+# nfl_data_py's own import_weekly_data() points at the nflverse "player_stats"
+# GitHub release, which nflverse deprecated on 2025-08-01 in favor of separate
+# "stats_player_week_<season>" release assets — the old release simply stopped
+# receiving new files, so import_weekly_data() 404s for any season from partway
+# through 2025 onward. We fetch the replacement release directly instead of
+# going through nfl_data_py, so current-season stats keep flowing. If nflverse
+# renames things again, this is the single place to update.
+_STATS_PLAYER_WEEK_URL = (
+    "https://github.com/nflverse/nflverse-data/releases/download/"
+    "stats_player/stats_player_week_{season}.parquet"
+)
+
+
+def _fetch_weekly_stats_df(seasons: list[int]) -> pd.DataFrame:
+    """
+    Fetch weekly player stats for the given seasons from the current nflverse
+    release, normalized to the column names the rest of this module expects
+    (i.e. what the old nfl_data_py.import_weekly_data() used to return).
+    """
+    frames = []
+    for season in seasons:
+        url = _STATS_PLAYER_WEEK_URL.format(season=season)
+        try:
+            season_df = pd.read_parquet(url)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Failed to fetch weekly stats for season %d from %s: %s", season, url, exc)
+            continue
+        if season_df is None or season_df.empty:
+            continue
+        frames.append(season_df)
+
+    if not frames:
+        return pd.DataFrame()
+
+    df = pd.concat(frames, ignore_index=True)
+
+    # Normalize column names: new release uses "team" instead of "recent_team",
+    # and has no snap_pct column (that now lives in a separate snap-counts
+    # release) — leave it absent so _safe_float(...) below just yields None.
+    if "team" in df.columns and "recent_team" not in df.columns:
+        df = df.rename(columns={"team": "recent_team"})
+
+    return df
+
 
 def ingest_player_stats(db: Session, seasons: list[int]) -> int:
     """
@@ -517,15 +561,13 @@ def ingest_player_stats(db: Session, seasons: list[int]) -> int:
     int
         Number of records processed.
     """
-    import nfl_data_py as nfl
-
     logger.info("Ingesting player stats for seasons: %s", seasons)
     started_at = datetime.utcnow()
 
     try:
-        df: pd.DataFrame = nfl.import_weekly_data(years=seasons)
+        df: pd.DataFrame = _fetch_weekly_stats_df(seasons)
     except Exception as exc:  # noqa: BLE001
-        logger.error("nfl_data_py.import_weekly_data(%s) failed: %s", seasons, exc)
+        logger.error("Fetching weekly stats for %s failed: %s", seasons, exc)
         _record_pipeline_run(
             db, "ingest_player_stats", PipelineStatus.failure,
             error_message=str(exc), started_at=started_at
@@ -533,7 +575,7 @@ def ingest_player_stats(db: Session, seasons: list[int]) -> int:
         return 0
 
     if df is None or df.empty:
-        logger.warning("import_weekly_data(%s) returned empty DataFrame.", seasons)
+        logger.warning("Weekly stats fetch for %s returned empty DataFrame.", seasons)
         return 0
 
     # Build lookup caches for performance

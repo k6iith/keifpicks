@@ -446,7 +446,19 @@ def build_current_week_features(db: Session, season: int, week: int) -> pd.DataF
     Build features for upcoming week players using all prior completed historical games.
     """
     prior_seasons = list(range(2022, season))
-    df_hist = build_player_game_observations(db, prior_seasons)
+    # Include the current season's already-completed weeks in "history" too —
+    # otherwise a week 3 prediction, say, would ignore that player's actual
+    # weeks 1-2 form this season and fall back on however their PREVIOUS
+    # season happened to end, which can be a year+ stale and badly misleading
+    # (e.g. treating a player's final-week-of-last-season hot streak as their
+    # current form). player_game_stats only ever has rows for games that have
+    # actually been played, so this can't leak future/unplayed games — but we
+    # still explicitly exclude the target week (and anything at/after it) in
+    # case that week's stats have already landed (e.g. a Thursday game).
+    df_hist = build_player_game_observations(db, prior_seasons + [season])
+    df_hist = df_hist[
+        ~((df_hist["season"] == season) & (df_hist["week"] >= week))
+    ].reset_index(drop=True)
 
     upcoming_sql = text("""
         SELECT
@@ -488,6 +500,13 @@ def build_current_week_features(db: Session, season: int, week: int) -> pd.DataF
           AND g.season = :season AND g.week  = :week
           AND p.position IN ('QB','WR','TE','RB','K')
           AND p.status = 'ACT'
+          AND (
+              (p.position = 'QB' AND r.depth_chart_rank <= 1) OR
+              (p.position = 'RB' AND r.depth_chart_rank <= 2) OR
+              (p.position = 'WR' AND r.depth_chart_rank <= 3) OR
+              (p.position = 'TE' AND r.depth_chart_rank <= 2) OR
+              (p.position = 'K'  AND r.depth_chart_rank <= 1)
+          )
     """)
 
     try:
