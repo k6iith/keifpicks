@@ -133,18 +133,32 @@ def generate_predictions_for_features(
                 p75s = np.clip(probs * 1.5, 0.0, 1.0)
             else:
                 preds = np.maximum(0.0, model.predict(X_mat))
-                
-                # Empirical calibration: remove systematic offsets so model projections
-                # are balanced and sharp across all prop categories (passing, rushing, receiving, attempts, TDs)
-                prop_calibration_offsets = {
-                    "passing_yards": +7.5,
-                    "rushing_yards": +11.0,
-                    "receiving_yards": -4.0,
-                    "rushing_attempts": +4.5,
-                    "passing_tds": +0.6,
+
+                # Empirical calibration: nudge model projections to correct a
+                # systematic bias measured against actual outcomes.
+                #
+                # This used to be a flat additive offset (e.g. always +11.0
+                # rushing yards) applied to every player regardless of their
+                # own projection. That's fine for a player near the typical
+                # baseline it was calibrated against, but it badly distorts
+                # low-volume players: +11 yards is a small nudge for a
+                # 90-yard workhorse projection and a huge, disproportionate
+                # one for a 15-yard backup's. It also compounds on top of
+                # any other source of an inflated raw projection instead of
+                # scaling with it. Expressing the same correction as a
+                # percentage of each player's own projection keeps the
+                # intended average correction for a typical player while not
+                # blowing up low-output players' numbers.
+                prop_calibration_pcts = {
+                    # value = (previous flat offset) / (typical projection for that prop)
+                    "passing_yards": 7.5 / 230.0,      # ~+3.3%
+                    "rushing_yards": 11.0 / 55.0,      # ~+20%
+                    "receiving_yards": -4.0 / 45.0,    # ~-8.9%
+                    "rushing_attempts": 4.5 / 13.0,    # ~+34.6%
+                    "passing_tds": 0.6 / 1.6,          # ~+37.5%
                 }
-                if prop in prop_calibration_offsets:
-                    preds = np.maximum(0.0, preds + prop_calibration_offsets[prop])
+                if prop in prop_calibration_pcts:
+                    preds = np.maximum(0.0, preds * (1.0 + prop_calibration_pcts[prop]))
 
                 residual_std = float(meta.get("residual_std", 15.0))
 
