@@ -20,13 +20,14 @@
     "carry_share_4wk",
     "yards_per_carry",
     "rushing_yards_trend",
+    "snap_pct_4wk",
     "opp_rush_yards_allowed_rank"
   ],
-  "mae": 19.61,
-  "rmse": 27.59,
-  "baseline_mae": 18.53,
-  "baseline_rmse": 26.19,
-  "residual_std": 27.59,
-  "trained_at": "2026-09-25T02:37:26.799173",
-  "n_samples": 6178
+  "mae": 19.06,
+  "rmse": 26.71,
+  "baseline_mae": 18.86,
+  "baseline_rmse": 26.88,
+  "residual_std": 26.68,
+  "trained_at": "2026-09-26T19:43:01.338538",
+  "n_samples": 8580
 }
