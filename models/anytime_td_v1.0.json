@@ -21,9 +21,9 @@
     "opp_rush_yards_allowed_rank",
     "opp_pass_yards_allowed_rank"
   ],
-  "brier_score": 0.1596,
-  "log_loss": 0.4913,
-  "baseline_brier": 0.1741,
-  "trained_at": "2026-09-25T02:37:34.241209",
-  "n_samples": 15054
+  "brier_score": 0.1332,
+  "log_loss": 0.4238,
+  "baseline_brier": 0.1515,
+  "trained_at": "2026-09-26T19:43:03.534839",
+  "n_samples": 21598
 }

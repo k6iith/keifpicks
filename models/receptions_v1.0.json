@@ -18,14 +18,15 @@
     "targets_3wk",
     "targets_5wk",
     "target_share_4wk",
+    "snap_pct_4wk",
     "opp_targets_allowed_to_wr_rank",
     "opp_targets_allowed_to_te_rank"
   ],
-  "mae": 1.38,
-  "rmse": 1.86,
-  "baseline_mae": 1.37,
-  "baseline_rmse": 1.88,
-  "residual_std": 1.86,
-  "trained_at": "2026-09-25T02:37:33.927309",
-  "n_samples": 13009
+  "mae": 1.39,
+  "rmse": 1.83,
+  "baseline_mae": 1.42,
+  "baseline_rmse": 1.9,
+  "residual_std": 1.83,
+  "trained_at": "2026-09-26T19:43:03.169298",
+  "n_samples": 18743
 }

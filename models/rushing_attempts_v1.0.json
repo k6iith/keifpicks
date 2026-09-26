@@ -14,13 +14,14 @@
     "carries_career_avg",
     "carries_weighted_baseline",
     "carry_share_4wk",
+    "snap_pct_4wk",
     "opp_rush_yards_allowed_rank"
   ],
-  "mae": 3.23,
-  "rmse": 4.5,
-  "baseline_mae": 3.1,
-  "baseline_rmse": 4.29,
-  "residual_std": 4.49,
-  "trained_at": "2026-09-25T02:37:28.620015",
-  "n_samples": 6178
+  "mae": 3.26,
+  "rmse": 4.49,
+  "baseline_mae": 3.29,
+  "baseline_rmse": 4.55,
+  "residual_std": 4.42,
+  "trained_at": "2026-09-26T19:43:02.311888",
+  "n_samples": 8580
 }
