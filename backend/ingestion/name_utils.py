@@ -27,6 +27,26 @@ from sqlalchemy.orm import Session
 
 from backend.db.models import Player, Prediction
 
+# Positions that should be treated as the same slot when matching by name
+# (depth charts say "CB"/"PK" where the roster source may say "DB"/"K").
+_POSITION_ALIASES = {
+    "K": {"K", "PK"},
+    "PK": {"K", "PK"},
+    "CB": {"CB", "DB"},
+    "DB": {"CB", "DB", "S", "SS", "FS"},
+}
+
+OFFENSIVE_POSITIONS = ("QB", "RB", "WR", "TE", "K", "FB")
+
+
+def _expand_positions(positions: Iterable[str]) -> set:
+    out = set()
+    for pos in positions:
+        pos = (pos or "").upper()
+        out |= _POSITION_ALIASES.get(pos, {pos})
+    return out
+
+
 # Generational / suffix tokens that commonly differ between sources.
 _SUFFIX_RE = re.compile(r"\s+(jr\.?|sr\.?|ii|iii|iv|v)$", re.IGNORECASE)
 
@@ -82,6 +102,7 @@ def find_player_by_name(
     name: str,
     *,
     team_ids: Optional[Iterable[int]] = None,
+    positions: Optional[Iterable[str]] = None,
 ) -> Optional[Player]:
     """
     Resolve a scraped player name to an existing Player row.
@@ -91,6 +112,13 @@ def find_player_by_name(
     a name resolves to more than one existing row (an existing duplicate),
     prefers the row that currently holds live model predictions — see
     `_pick_best`.
+
+    positions: when given, candidates at a matching position are preferred
+    over everyone else. Two different real players can share a name (e.g.
+    Lamar Jackson the Ravens QB and Lamar Jackson the DB); without this, the
+    QB1 depth-chart slot could resolve to the DB, who then never shows up in
+    QB predictions. Falls back to the other candidates only if nobody at
+    those positions matches.
 
     Returns None if nothing matches — callers decide whether to create
     a new player in that case.
@@ -103,6 +131,7 @@ def find_player_by_name(
         return None
 
     team_ids = list(team_ids) if team_ids else None
+    wanted_positions = _expand_positions(positions) if positions else None
 
     def _candidates(scope_teams: bool) -> List[Player]:
         q = db.query(Player)
@@ -110,10 +139,18 @@ def find_player_by_name(
             q = q.filter(Player.team_id.in_(team_ids))
         return [c for c in q.all() if normalize_player_name(c.full_name) == target]
 
-    if team_ids:
-        scoped = _candidates(scope_teams=True)
-        if scoped:
-            return _pick_best(db, scoped)
+    def _at_position(cands: List[Player]) -> List[Player]:
+        if not wanted_positions:
+            return cands
+        return [c for c in cands if (c.position or "").upper() in wanted_positions]
 
+    scoped = _candidates(scope_teams=True) if team_ids else []
     unscoped = _candidates(scope_teams=False)
-    return _pick_best(db, unscoped)
+
+    # Position match beats team scoping: a same-named player at the wrong
+    # position who happens to carry the right team_id (e.g. because an
+    # earlier bad match overwrote it) must not win over the real player.
+    for pool in (_at_position(scoped), _at_position(unscoped), scoped, unscoped):
+        if pool:
+            return _pick_best(db, pool)
+    return None

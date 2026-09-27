@@ -14,7 +14,7 @@ from sqlalchemy.orm import Session
 
 from backend.config import settings
 from backend.db.models import Game, MarketLine, Player, Team
-from backend.ingestion.name_utils import find_player_by_name
+from backend.ingestion.name_utils import OFFENSIVE_POSITIONS, find_player_by_name
 
 logger = logging.getLogger(__name__)
 
@@ -191,7 +191,9 @@ def _find_player(db: Session, player_name: str, game: Optional[Game] = None) -> 
     clean_name = player_name.strip()
     team_ids = [game.home_team_id, game.away_team_id] if game else None
 
-    p = find_player_by_name(db, clean_name, team_ids=team_ids)
+    # Player props are offensive markets, so never resolve to a same-named
+    # defender (e.g. Lamar Jackson the DB instead of the Ravens QB).
+    p = find_player_by_name(db, clean_name, team_ids=team_ids, positions=OFFENSIVE_POSITIONS)
     if p:
         return p
 
