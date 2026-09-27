@@ -65,9 +65,14 @@ def sync_espn_rosters_and_depth_charts():
                         positions = group.get('positions', {})
                         for pos_k, pos_v in positions.items():
                             pos_abbr = pos_v.get('position', {}).get('abbreviation')
-                            if pos_abbr not in ['QB', 'RB', 'WR', 'TE', 'PK', 'K']:
+                            # CB is included so add_injury_features() can tell
+                            # whether an opponent's starting corner is out —
+                            # previously only offensive skill positions were
+                            # tracked, so that feature had no depth chart data
+                            # to check at all and stayed permanently False.
+                            if pos_abbr not in ['QB', 'RB', 'WR', 'TE', 'PK', 'K', 'CB']:
                                 continue
-                            
+
                             norm_pos = 'K' if pos_abbr == 'PK' else pos_abbr
                             athletes = pos_v.get('athletes', [])
                             
