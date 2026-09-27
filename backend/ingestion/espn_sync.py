@@ -87,7 +87,7 @@ def sync_espn_rosters_and_depth_charts():
                                 # suffix-insensitive match before creating a new row —
                                 # otherwise every sync spawns a duplicate Player whose
                                 # predictions never see the real Player's market lines.
-                                player = find_player_by_name(db, ath_name, team_ids=[db_team.id])
+                                player = find_player_by_name(db, ath_name, team_ids=[db_team.id], positions=[norm_pos])
                                 if not player:
                                     # Try fuzzy or create
                                     player = Player(
@@ -141,7 +141,7 @@ def sync_espn_rosters_and_depth_charts():
                                 p_pos = ath.get('position', {}).get('abbreviation')
                                 if p_pos in ['QB', 'RB', 'WR', 'TE', 'PK', 'K']:
                                     norm_pos = 'K' if p_pos == 'PK' else p_pos
-                                    p = find_player_by_name(db, p_name, team_ids=[db_team.id])
+                                    p = find_player_by_name(db, p_name, team_ids=[db_team.id], positions=[norm_pos])
                                     if p:
                                         p.team_id = db_team.id
                                         p.status = 'ACT'
