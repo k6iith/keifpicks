@@ -44,6 +44,50 @@ BASE_CONTEXT_FEATURES = [
     "dynamic_hist_weight",
 ]
 
+# Rolling validation window: always validate on the most recent N completed
+# (season, week) pairs rather than "the whole current season", which shrinks
+# to almost nothing right after Week 1 and produces noisy MAE/Brier
+# comparisons early in every season. See _rolling_time_split() below.
+_MIN_VAL_WEEKS = 6
+_MIN_VAL_SAMPLES = 40
+
+
+def _rolling_time_split(clean_df: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    """
+    Split clean_df into (train_df, val_df) using a rolling window of the
+    most recent completed weeks as validation, widening the window if that
+    leaves too few validation samples (but never past half the data).
+    Falls back to a plain 80/20 positional split if season/week columns
+    aren't usable (e.g. only one week of data on file at all).
+    """
+    if "season" in clean_df.columns and "week" in clean_df.columns and clean_df[["season", "week"]].drop_duplicates().shape[0] > 1:
+        week_keys = (
+            clean_df[["season", "week"]]
+            .drop_duplicates()
+            .sort_values(["season", "week"])
+            .reset_index(drop=True)
+        )
+        n_weeks_avail = len(week_keys)
+        n_val = min(_MIN_VAL_WEEKS, n_weeks_avail - 1)
+
+        while n_val < n_weeks_avail - 1:
+            val_weeks = week_keys.tail(n_val)
+            val_key_set = set(map(tuple, val_weeks.to_numpy()))
+            val_mask = clean_df[["season", "week"]].apply(tuple, axis=1).isin(val_key_set)
+            if val_mask.sum() >= _MIN_VAL_SAMPLES or n_val >= n_weeks_avail // 2:
+                break
+            n_val += 2
+
+        n_val = max(n_val, 1)
+        val_weeks = week_keys.tail(n_val)
+        val_key_set = set(map(tuple, val_weeks.to_numpy()))
+        val_mask = clean_df[["season", "week"]].apply(tuple, axis=1).isin(val_key_set)
+        return clean_df[~val_mask], clean_df[val_mask]
+
+    split_idx = int(len(clean_df) * 0.8)
+    return clean_df.iloc[:split_idx], clean_df.iloc[split_idx:]
+
+
 PROP_FEATURE_REGISTRY: Dict[str, List[str]] = {
     "passing_yards": BASE_CONTEXT_FEATURES + [
         "passing_yards_3wk",
@@ -58,6 +102,7 @@ PROP_FEATURE_REGISTRY: Dict[str, List[str]] = {
         "yards_per_attempt",
         "passing_yards_trend",
         "opp_pass_yards_allowed_rank",
+        "qb_is_out",
     ],
     "passing_tds": BASE_CONTEXT_FEATURES + [
         "passing_tds_3wk",
@@ -67,6 +112,7 @@ PROP_FEATURE_REGISTRY: Dict[str, List[str]] = {
         "passing_yards_3wk",
         "attempts_3wk",
         "opp_pass_yards_allowed_rank",
+        "qb_is_out",
     ],
     "rushing_yards": BASE_CONTEXT_FEATURES + [
         "rushing_yards_3wk",
@@ -82,6 +128,8 @@ PROP_FEATURE_REGISTRY: Dict[str, List[str]] = {
         "rushing_yards_trend",
         "snap_pct_4wk",
         "opp_rush_yards_allowed_rank",
+        "rb1_is_out",
+        "qb_is_out",
     ],
     "rushing_attempts": BASE_CONTEXT_FEATURES + [
         "carries_3wk",
@@ -91,6 +139,8 @@ PROP_FEATURE_REGISTRY: Dict[str, List[str]] = {
         "carry_share_4wk",
         "snap_pct_4wk",
         "opp_rush_yards_allowed_rank",
+        "rb1_is_out",
+        "qb_is_out",
     ],
     "receiving_yards": BASE_CONTEXT_FEATURES + [
         "receiving_yards_3wk",
@@ -112,6 +162,9 @@ PROP_FEATURE_REGISTRY: Dict[str, List[str]] = {
         "opp_pass_yards_allowed_rank",
         "opp_targets_allowed_to_wr_rank",
         "opp_targets_allowed_to_te_rank",
+        "wr1_is_out",
+        "opp_cb1_is_out",
+        "qb_is_out",
     ],
     "receptions": BASE_CONTEXT_FEATURES + [
         "receptions_3wk",
@@ -126,6 +179,9 @@ PROP_FEATURE_REGISTRY: Dict[str, List[str]] = {
         "snap_pct_4wk",
         "opp_targets_allowed_to_wr_rank",
         "opp_targets_allowed_to_te_rank",
+        "wr1_is_out",
+        "opp_cb1_is_out",
+        "qb_is_out",
     ],
     "anytime_td": BASE_CONTEXT_FEATURES + [
         "rushing_yards_3wk",
@@ -137,6 +193,10 @@ PROP_FEATURE_REGISTRY: Dict[str, List[str]] = {
         "snap_pct_4wk",
         "opp_rush_yards_allowed_rank",
         "opp_pass_yards_allowed_rank",
+        "rb1_is_out",
+        "wr1_is_out",
+        "opp_cb1_is_out",
+        "qb_is_out",
     ],
 }
 
@@ -187,15 +247,13 @@ def train_prop_regressor(
     for c in features:
         clean_df[c] = clean_df[c].fillna(0.0)
 
-    # Time-based split: Train on seasons < 2024, Test on 2024
-    if "season" in clean_df.columns and clean_df["season"].nunique() > 1:
-        max_season = clean_df["season"].max()
-        train_df = clean_df[clean_df["season"] < max_season]
-        val_df = clean_df[clean_df["season"] == max_season]
-    else:
-        split_idx = int(len(clean_df) * 0.8)
-        train_df = clean_df.iloc[:split_idx]
-        val_df = clean_df.iloc[split_idx:]
+    # Rolling last-N-completed-weeks validation window — see
+    # _rolling_time_split()'s docstring for why this replaced "validate on
+    # the whole current season" (that shrank to almost nothing right after
+    # Week 1 and is exactly what caused passing_yards/passing_tds to get
+    # rejected in a real retrain run this week purely from sample-size
+    # noise, not an actually worse model).
+    train_df, val_df = _rolling_time_split(clean_df)
 
     X_train = np.ascontiguousarray(train_df[features].to_numpy(dtype=np.float32, copy=True))
     y_train = np.ascontiguousarray(train_df[target_col].to_numpy(dtype=np.float32, copy=True))
@@ -300,14 +358,7 @@ def train_td_model(df: pd.DataFrame, version: str = "1.0") -> Dict[str, Any]:
     if len(clean_df) < 50:
         return {"status": "INSUFFICIENT_DATA"}
 
-    if "season" in clean_df.columns and clean_df["season"].nunique() > 1:
-        max_season = clean_df["season"].max()
-        train_df = clean_df[clean_df["season"] < max_season]
-        val_df = clean_df[clean_df["season"] == max_season]
-    else:
-        split_idx = int(len(clean_df) * 0.8)
-        train_df = clean_df.iloc[:split_idx]
-        val_df = clean_df.iloc[split_idx:]
+    train_df, val_df = _rolling_time_split(clean_df)
 
     X_train = np.ascontiguousarray(train_df[features].to_numpy(dtype=np.float32, copy=True))
     y_train = np.ascontiguousarray(train_df["anytime_td"].to_numpy(dtype=np.int32, copy=True))
