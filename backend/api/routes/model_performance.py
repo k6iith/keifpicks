@@ -14,6 +14,7 @@ from sqlalchemy.orm import Session
 from backend.api.schemas import CalibrationData, CalibrationPoint, ModelPerformanceList, ModelPerformanceSchema
 from backend.db.database import get_db
 from backend.db.models import ModelPerformance
+from backend.models.performance import check_performance_degradation
 
 logger = logging.getLogger(__name__)
 router = APIRouter(tags=["Model Performance"])
@@ -102,3 +103,22 @@ def get_model_calibration(
         calibration_points=calibration_points,
         disclaimer=DISCLAIMER,
     )
+
+
+# ---------------------------------------------------------------------------
+# GET /api/model/alerts
+# ---------------------------------------------------------------------------
+@router.get(
+    "/model/alerts",
+    summary="Live model performance-degradation alerts",
+)
+def get_model_alerts(db: Session = Depends(get_db)):
+    """
+    Any prop whose most recently scored week is meaningfully worse than its
+    own trailing average gets flagged here. Computed on demand from
+    ModelPerformance rather than stored, so it's always current as of the
+    last time score_completed_games() ran (Monday mornings, plus whenever
+    it's triggered manually).
+    """
+    alerts = check_performance_degradation(db)
+    return {"alerts": alerts, "count": len(alerts)}

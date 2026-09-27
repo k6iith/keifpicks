@@ -12,7 +12,9 @@ from typing import Optional
 import httpx
 from sqlalchemy.orm import Session
 
-from backend.db.models import Injury, Player
+from sqlalchemy import or_
+
+from backend.db.models import Injury, Player, Game
 from backend.ingestion.name_utils import find_player_by_name
 
 logger = logging.getLogger(__name__)
@@ -38,7 +40,7 @@ def fetch_espn_injuries() -> list[dict]:
         {
           'player_id_espn': str | None,
           'player_name': str,
-          'team_abbr': str,
+          'team_full_name': str,
           'status': str,          # e.g. 'Questionable', 'Out', 'IR'
           'injury_type': str,     # body part / description
           'source': 'ESPN',
@@ -74,15 +76,29 @@ def fetch_espn_injuries() -> list[dict]:
     records: list[dict] = []
     fetched_at = datetime.utcnow()
 
+    # ESPN's response used to nest each team's info under a "team": {...}
+    # sub-object with an "abbreviation" field. That's gone — each entry in
+    # the top-level "injuries" array now just has "id"/"displayName"
+    # directly on it (e.g. displayName="Arizona Cardinals"), with no
+    # abbreviation anywhere in the payload at all. team_group.get("team",
+    # {}) was silently returning {} for every team, so team_abbr was always
+    # "" — which meant every injury record fed team-scoped player matching
+    # nothing to scope by. Use the team's full display name instead (it
+    # matches Team.full_name in our own DB) and resolve to an abbreviation
+    # from there.
     try:
-        # ESPN response structure: {"injuries": [{"team": {...}, "injuries": [...]}]}
         team_groups = data.get("injuries", [])
-        for team_group in team_groups:
-            team_info = team_group.get("team", {})
-            # ESPN uses short abbreviation like "KC", "SF" etc.
-            team_abbr: str = team_info.get("abbreviation", "")
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Error reading ESPN injury response: %s", exc)
+        return []
 
-            for injury_entry in team_group.get("injuries", []):
+    for team_group in team_groups:
+        team_full_name: str = team_group.get("displayName", "")
+
+        for injury_entry in team_group.get("injuries", []):
+            # Per-entry try/except so one malformed record doesn't blank out
+            # every other team's injuries along with it.
+            try:
                 athlete = injury_entry.get("athlete", {})
                 player_name: str = athlete.get("displayName", athlete.get("fullName", ""))
                 player_id_espn: Optional[str] = athlete.get("id") or None
@@ -92,11 +108,12 @@ def fetch_espn_injuries() -> list[dict]:
                 if isinstance(status_obj, dict):
                     status_str = status_obj.get("type", {}).get("description", "")
                 else:
-                    status_str = str(status_obj)
+                    status_str = str(status_obj) if status_obj else ""
 
                 # Injury details
-                injury_type = injury_entry.get("details", {}).get("type", "") or ""
-                detail_str = injury_entry.get("details", {}).get("detail", "") or ""
+                details = injury_entry.get("details") or {}
+                injury_type = details.get("type", "") or ""
+                detail_str = details.get("detail", "") or ""
                 injury_description = f"{injury_type} – {detail_str}".strip(" –") or injury_type
 
                 if not player_name:
@@ -106,32 +123,36 @@ def fetch_espn_injuries() -> list[dict]:
                     {
                         "player_id_espn": str(player_id_espn) if player_id_espn else None,
                         "player_name": player_name,
-                        "team_abbr": team_abbr,
+                        "team_full_name": team_full_name,
                         "status": status_str,
                         "injury_type": injury_description,
                         "source": "ESPN",
                         "fetched_at": fetched_at,
                     }
                 )
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("Error parsing ESPN injury response: %s", exc)
-        return []
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Skipping one malformed ESPN injury entry: %s", exc)
+                continue
 
     logger.info("ESPN injuries fetched: %d player records.", len(records))
     return records
 
 
-def _find_player(db: Session, player_name: str, team_abbr: str) -> Optional[Player]:
+def _find_player(db: Session, player_name: str, team_full_name: str) -> Optional[Player]:
     """
-    Attempt to match a player by full_name + team abbreviation, falling back
-    to a suffix-insensitive match ("Kenneth Walker" ~ "Kenneth Walker III")
-    and then to a name-only match (handles team changes mid-season).
+    Attempt to match a player by full_name + team, falling back to a
+    suffix-insensitive match ("Kenneth Walker" ~ "Kenneth Walker III") and
+    then to a name-only match (handles team changes mid-season).
+
+    ESPN's injury feed only gives us the team's full display name (e.g.
+    "Arizona Cardinals"), not an abbreviation, so we resolve against
+    Team.full_name here rather than Team.abbreviation.
     """
     from backend.db.models import Team
 
     team_ids = None
-    if team_abbr:
-        team = db.query(Team).filter(Team.abbreviation == team_abbr).first()
+    if team_full_name:
+        team = db.query(Team).filter(Team.full_name == team_full_name).first()
         if team:
             team_ids = [team.id]
 
@@ -143,12 +164,36 @@ def _find_player(db: Session, player_name: str, team_abbr: str) -> Optional[Play
     return db.query(Player).filter(Player.full_name == player_name).first()
 
 
+def _find_upcoming_game(db: Session, player: Player) -> Optional[Game]:
+    """
+    Find the next not-yet-played game for a player's current team, so an
+    injury report can be tied to the game it actually applies to.
+
+    Without this, Injury rows never got a game_id at all, which meant
+    add_injury_features()'s query (`WHERE i.game_id IS NOT NULL`) never
+    matched a single row — every injury tag in the model was hardcoded to
+    False regardless of who was actually hurt.
+    """
+    if not player.team_id:
+        return None
+
+    return (
+        db.query(Game)
+        .filter(
+            or_(Game.home_team_id == player.team_id, Game.away_team_id == player.team_id),
+            Game.status != "final",
+        )
+        .order_by(Game.kickoff_time.asc())
+        .first()
+    )
+
+
 def ingest_injuries(db: Session) -> int:
     """
     Fetch ESPN injury data and upsert Injury records into the database.
 
     Matching strategy:
-      1. Try player_name + team_abbr exact match.
+      1. Try player_name + team full name exact match.
       2. Fallback to player_name only.
       3. If no match found, skip (we never create phantom players).
 
@@ -171,14 +216,17 @@ def ingest_injuries(db: Session) -> int:
 
     try:
         for rec in raw_records:
-            player = _find_player(db, rec["player_name"], rec["team_abbr"])
+            player = _find_player(db, rec["player_name"], rec["team_full_name"])
             if not player:
                 logger.debug(
                     "No player match for '%s' (%s) — skipping injury record.",
                     rec["player_name"],
-                    rec["team_abbr"],
+                    rec["team_full_name"],
                 )
                 continue
+
+            upcoming_game = _find_upcoming_game(db, player)
+            game_id = upcoming_game.id if upcoming_game else None
 
             # Upsert: one injury record per player per day (report_date)
             existing: Optional[Injury] = (
@@ -194,9 +242,11 @@ def ingest_injuries(db: Session) -> int:
                 existing.game_status = rec["status"]
                 existing.injury_description = rec["injury_type"]
                 existing.source = rec["source"]
+                existing.game_id = game_id
             else:
                 injury = Injury(
                     player_id=player.id,
+                    game_id=game_id,
                     report_date=today,
                     game_status=rec["status"],
                     injury_description=rec["injury_type"],

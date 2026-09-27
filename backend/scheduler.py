@@ -4,6 +4,7 @@ Configures recurring APScheduler cron jobs for automated data updates.
 - Hourly: injuries, weather, odds
 - Tuesday 6am: weekly schedule and roster refresh
 - Wednesday 5am: model retraining against the newly-completed week
+- Friday 8am: mid-week injuries/odds refresh + prediction regeneration
 - Monday 3am: final game stats and model performance recalculation
 """
 import logging
@@ -112,6 +113,43 @@ def run_weekly_refresh():
         logger.error("Error during weekly depth-chart/prediction refresh: %s", exc)
 
 
+def run_midweek_refresh():
+    """
+    Friday morning refresh: re-sync injuries/odds and regenerate predictions
+    from whatever's changed since Tuesday, without re-pulling the full
+    schedule/player-stats tables (that's what Tuesday's run_weekly_refresh
+    is for).
+
+    Predictions previously only ever refreshed once a week, on Tuesday.
+    That's fine right after a game week ends, but by Friday — after a full
+    week of practice reports, questionable/out designations firming up, and
+    lines moving — Tuesday's predictions can be noticeably stale. This
+    doesn't touch box-score stats (there's nothing new there mid-week); it
+    just pulls the latest injury/odds picture and rebuilds this week's
+    predictions against it.
+    """
+    logger.info("⏰ Starting scheduled mid-week refresh...")
+    db = SessionLocal()
+    try:
+        injuries_count = ingest_injuries(db)
+        logger.info("Mid-week injuries update: %d records", injuries_count)
+
+        odds_count = ingest_market_lines(db)
+        logger.info("Mid-week odds update: %d records", odds_count)
+    except Exception as exc:
+        logger.error("Error during mid-week refresh: %s", exc)
+    finally:
+        db.close()
+
+    # Same reasoning as run_weekly_refresh: keep this in its own step/session
+    # so a failure ingesting injuries/odds above doesn't block the
+    # depth-chart/prediction regeneration below, and vice versa.
+    try:
+        sync_espn_rosters_and_depth_charts()
+    except Exception as exc:
+        logger.error("Error during mid-week depth-chart/prediction refresh: %s", exc)
+
+
 def run_scoring_job():
     """Score completed games and recalculate model metrics."""
     logger.info("⏰ Starting post-game evaluation and scoring...")
@@ -172,6 +210,16 @@ def start_scheduler():
             replace_existing=True,
         )
 
+        # Friday 8:00 AM mid-week refresh (injuries/odds firm up by Friday;
+        # this regenerates predictions against the freshest picture without
+        # waiting for next Tuesday)
+        scheduler.add_job(
+            run_midweek_refresh,
+            CronTrigger(day_of_week="fri", hour=8, minute=0),
+            id="midweek_refresh",
+            replace_existing=True,
+        )
+
         # Monday 3:00 AM scoring
         scheduler.add_job(
             run_scoring_job,
@@ -181,7 +229,7 @@ def start_scheduler():
         )
 
         scheduler.start()
-        logger.info("✅ APScheduler started with 4 background pipelines.")
+        logger.info("✅ APScheduler started with 5 background pipelines.")
 
 
 def shutdown_scheduler():
