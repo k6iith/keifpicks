@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+from collections import Counter, deque
 from typing import Optional, List, Dict, Any
 
 import numpy as np
@@ -93,8 +94,15 @@ def build_player_game_observations(db: Session, seasons: list[int]) -> pd.DataFr
         FROM player_game_stats pgs
         JOIN players           p   ON p.id  = pgs.player_id
         LEFT JOIN teams        t   ON t.id  = pgs.team_id
-        LEFT JOIN teams        opp ON opp.id = pgs.opponent_id
         JOIN games             g   ON g.id  = pgs.game_id
+        -- opponent_id is missing on every 2022 row and most 2024 rows, which
+        -- silently zeroed out matchup features for those seasons; derive it
+        -- from the game's home/away teams when it isn't set.
+        LEFT JOIN teams        opp ON opp.id = COALESCE(
+            pgs.opponent_id,
+            CASE WHEN pgs.team_id = g.home_team_id THEN g.away_team_id
+                 WHEN pgs.team_id = g.away_team_id THEN g.home_team_id END
+        )
         WHERE g.season IN ({season_placeholders})
           AND g.game_type = 'REG'
         ORDER BY pgs.player_id, g.kickoff_time, g.id
@@ -313,7 +321,11 @@ def add_matchup_features(df: pd.DataFrame, db: Session) -> pd.DataFrame:
         FROM player_game_stats pgs
         JOIN games   g   ON g.id  = pgs.game_id
         JOIN players p   ON p.id  = pgs.player_id
-        LEFT JOIN teams opp ON opp.id = pgs.opponent_id
+        LEFT JOIN teams opp ON opp.id = COALESCE(
+            pgs.opponent_id,
+            CASE WHEN pgs.team_id = g.home_team_id THEN g.away_team_id
+                 WHEN pgs.team_id = g.away_team_id THEN g.home_team_id END
+        )
         WHERE g.game_type = 'REG'
         GROUP BY opp.abbreviation, g.season, g.week
         ORDER BY g.season, g.week
@@ -339,27 +351,53 @@ def add_matchup_features(df: pd.DataFrame, db: Session) -> pd.DataFrame:
             df[c] = 16.0
         return df
 
-    def_df = def_df.sort_values(["defense_team", "season", "week"])
     stat_targets = [
         "pass_yards_allowed", "rush_yards_allowed",
         "wr_targets_allowed", "te_targets_allowed", "rb_targets_allowed"
     ]
-    grp = def_df.groupby(["defense_team", "season"], sort=False)
-    for c in stat_targets:
-        def_df[f"{c}_ytd"] = grp[c].transform(lambda s: s.shift(1).cumsum())
+    def_df = def_df.dropna(subset=["defense_team"])
 
-    # Rank each defense within its (season, week) group. Using groupby(...).apply()
-    # here is fragile across pandas versions: pandas 3.x excludes the grouping
-    # columns ("season", "week") from what's passed into the applied function by
-    # default, so a value reassigned from the result loses those columns on the
-    # very next loop iteration (KeyError: 'season'). A groupby(...)[col].rank(...)
-    # transform avoids that entirely and works the same on pandas 2.x and 3.x.
+    # Build a full (team, season, week) grid so every defense has a row for
+    # every week, including byes and weeks it hasn't played yet. def_df alone
+    # only has a row once that team's game for the week is recorded, so an
+    # exact (opponent_abbr, season, week) merge missed nearly every team for
+    # the upcoming week and everyone fell back to the neutral 16.0.
+    teams_seasons = def_df[["defense_team", "season"]].drop_duplicates()
+    max_week = int(max(df["week"].max(), def_df["week"].max()))
+    week_grid = pd.DataFrame({"week": range(1, max_week + 1)})
+    grid = teams_seasons.merge(week_grid, how="cross")
+    def_full = grid.merge(
+        def_df[["defense_team", "season", "week"] + stat_targets],
+        on=["defense_team", "season", "week"],
+        how="left",
+    ).sort_values(["defense_team", "season", "week"]).reset_index(drop=True)
+
+    # Per-game allowed averages through the END of each week (bye weeks
+    # carry the previous average forward). Per-game rather than raw season
+    # totals so a team that has had its bye isn't ranked as a stingier
+    # defense just for having played one fewer game.
+    grp = def_full.groupby(["defense_team", "season"], sort=False)
+    games_played = grp[stat_targets[0]].transform(lambda s: s.notna().cumsum())
+    for c in stat_targets:
+        cum = grp[c].transform(lambda s: s.fillna(0.0).cumsum())
+        def_full[f"{c}_avg"] = np.where(games_played > 0, cum / games_played.replace(0, np.nan), np.nan)
+
+    # Rank every defense league-wide as of the end of each week (1 = allows
+    # the least), then shift by one week: the rank used for a week-W game is
+    # the standing after week W-1. That includes each team's most recent
+    # completed game (the old shift-then-cumsum approach dropped it, so a
+    # week-3 prediction only saw week-1 data) while still never using any
+    # game from week W itself. groupby(...)[col].rank(...) rather than
+    # groupby(...).apply(), which drops the grouping columns on pandas 3.x.
     for c, out_c in zip(stat_targets, matchup_cols):
-        def_df[out_c] = def_df.groupby(["season", "week"])[f"{c}_ytd"].rank(
+        rank_after = def_full.groupby(["season", "week"])[f"{c}_avg"].rank(
             ascending=True, method="average", na_option="keep"
         )
+        def_full[out_c] = rank_after.groupby(
+            [def_full["defense_team"], def_full["season"]], sort=False
+        ).shift(1)
 
-    def_slim = def_df[["defense_team", "season", "week"] + matchup_cols].rename(
+    def_slim = def_full[["defense_team", "season", "week"] + matchup_cols].rename(
         columns={"defense_team": "opponent_abbr"}
     )
     df = df.merge(def_slim, on=["opponent_abbr", "season", "week"], how="left")
@@ -405,34 +443,207 @@ def add_game_environment_features(df: pd.DataFrame, db: Session) -> pd.DataFrame
 # 5. Injury Features
 # ===========================================================================
 
-def add_injury_features(df: pd.DataFrame, db: Session) -> pd.DataFrame:
-    """Pre-kickoff injury status tags."""
-    if df.empty:
-        return df
+# ESPN spells statuses out ("Injured Reserve", not "IR") and wording/case has
+# shifted over time, so match on a normalized form rather than exact strings.
+_OUT_STATUSES = ("out", "doubtful", "ir", "injured reserve", "physically unable to perform", "pup", "suspended", "suspension")
 
+
+def _is_out_status(status: Optional[str]) -> bool:
+    # Whole-word match so e.g. "IR - Designated to Return" or "Out (Season)"
+    # count, but an unrelated word that merely starts with "out" doesn't.
+    s = " ".join((status or "").strip().lower().replace("-", " ").replace("(", " ").split())
+    return any(s == p or s.startswith(p + " ") for p in _OUT_STATUSES)
+
+
+def _latest_out_reports(db: Session) -> pd.DataFrame:
+    """
+    One row per (player, game) whose MOST RECENT injury report rules them
+    out (Out/Doubtful/IR/...). Using only the latest report matters: a player
+    listed Out on Wednesday but cleared by Friday must not stay flagged.
+    Columns: player_id, game_id.
+    """
     sql = text("""
-        SELECT
-            i.game_id,
-            p.position,
-            r.team_id,
-            r.depth_chart_rank,
-            i.game_status
-        FROM injuries i
-        JOIN players p ON p.id = i.player_id
-        LEFT JOIN rosters r ON r.player_id = i.player_id
-        WHERE i.game_id IS NOT NULL AND i.game_status IN ('Out', 'Doubtful', 'IR')
+        SELECT player_id, game_id, game_status, report_date, id
+        FROM injuries
+        WHERE game_id IS NOT NULL
     """)
-
     try:
         res = db.execute(sql)
-        inj_df = pd.DataFrame(res.fetchall(), columns=list(res.keys()))
+        rep = pd.DataFrame(res.fetchall(), columns=list(res.keys()))
     except Exception:
-        inj_df = pd.DataFrame()
+        logger.exception("Failed to query injury reports")
+        return pd.DataFrame(columns=["player_id", "game_id"])
+
+    if rep.empty:
+        return pd.DataFrame(columns=["player_id", "game_id"])
+
+    rep = rep.sort_values(["player_id", "game_id", "report_date", "id"])
+    rep = rep.drop_duplicates(subset=["player_id", "game_id"], keep="last")
+    rep = rep[rep["game_status"].map(_is_out_status)]
+    return rep[["player_id", "game_id"]].reset_index(drop=True)
+
+
+# Position -> (usage column that identifies the starter, own-team flag)
+_STARTER_USAGE = {
+    "QB": ("attempts", "qb_is_out"),
+    "RB": ("carries", "rb1_is_out"),
+    "WR": ("targets", "wr1_is_out"),
+}
+
+
+def _starter_absent_flags(df: pd.DataFrame, played_game_ids: set) -> Dict[str, np.ndarray]:
+    """
+    Historical stand-in for the injury report: for each completed team-game,
+    was the team's established starter at QB/RB1/WR1 missing from the box
+    score entirely?
+
+    Injury reports are only ingested going forward, so every historical
+    training row would otherwise have all injury flags False, and the
+    regressors drop constant features, so the flags could never be learned.
+    The starter is whoever led the team in usage (attempts/carries/targets)
+    over the team's previous 3 games of the same season; he's "out" if he
+    has no usage at all in this game. That's knowable pre-kickoff (the
+    inactive list), so it's not leakage. A starter who got hurt mid-game
+    still has usage and is not flagged. Opponent CB1 can't be derived this
+    way (no defensive player stats), so that flag stays report-only.
+    """
+    flags = {flag: np.zeros(len(df), dtype=bool) for _, flag in _STARTER_USAGE.values()}
+    hist = df[df["game_id"].isin(played_game_ids) & df["team_abbr"].notna()]
+    if hist.empty:
+        return flags
+
+    team_games = (
+        hist[["team_abbr", "season", "game_date", "game_id"]]
+        .drop_duplicates(subset=["team_abbr", "game_id"])
+        .sort_values(["team_abbr", "season", "game_date", "game_id"])
+    )
+    row_keys = list(zip(df["team_abbr"], df["game_id"]))
+
+    for pos, (ucol, flag) in _STARTER_USAGE.items():
+        if ucol not in hist.columns:
+            continue
+        pos_rows = hist[hist["position"] == pos]
+        usage = pos_rows.groupby(["team_abbr", "game_id", "player_id"])[ucol].sum()
+        by_team_game: Dict[tuple, Dict[Any, float]] = {}
+        for (team, gid, pid), u in usage.items():
+            if u > 0:
+                by_team_game.setdefault((team, gid), {})[pid] = float(u)
+
+        absent = set()
+        for (team, _season), tg in team_games.groupby(["team_abbr", "season"], sort=False):
+            window: deque = deque(maxlen=3)
+            for gid in tg["game_id"]:
+                played = by_team_game.get((team, gid), {})
+                if window:
+                    totals: Counter = Counter()
+                    for w in window:
+                        totals.update(w)
+                    if totals:
+                        leader, _ = totals.most_common(1)[0]
+                        if leader not in played:
+                            absent.add((team, gid))
+                window.append(played)
+
+        flags[flag] = np.array([k in absent for k in row_keys], dtype=bool)
+
+    return flags
+
+
+def add_injury_features(
+    df: pd.DataFrame,
+    db: Session,
+    exclude_game_ids: Optional[set] = None,
+) -> pd.DataFrame:
+    """
+    Pre-kickoff injury status tags: whether each side's starting QB/RB1/WR1,
+    or the opponent's starting CB1, is out for this game.
+
+    Two sources, OR'd together:
+      1. Injury reports (latest report per player/game ruling them
+         Out/Doubtful/IR), matched to that game week's depth chart starters.
+      2. For completed games only, whether the team's established starter
+         was missing from the box score (_starter_absent_flags), so the
+         training history carries real signal for these flags too.
+
+    exclude_game_ids: games to skip for source 2, e.g. the upcoming games in
+    build_current_week_features whose placeholder rows have zero stats (and
+    would otherwise look like every starter sat out).
+    """
+    if df.empty:
+        return df
 
     df["qb_is_out"] = False
     df["rb1_is_out"] = False
     df["wr1_is_out"] = False
     df["opp_cb1_is_out"] = False
+
+    # --- Source 2: historical box-score absence --------------------------
+    try:
+        res = db.execute(text("SELECT DISTINCT game_id FROM player_game_stats"))
+        played_game_ids = {r[0] for r in res.fetchall()}
+    except Exception:
+        logger.exception("Failed to query played games for injury features")
+        played_game_ids = set()
+    if exclude_game_ids:
+        played_game_ids -= set(exclude_game_ids)
+
+    for flag, values in _starter_absent_flags(df, played_game_ids).items():
+        df[flag] = values
+
+    # --- Source 1: injury reports ----------------------------------------
+    out_reports = _latest_out_reports(db)
+    if out_reports.empty:
+        return df
+
+    # Match against the depth chart for the injured game's own week, so a
+    # player who was a starter in some old snapshot doesn't count.
+    try:
+        res = db.execute(text("""
+            SELECT r.player_id, g.id AS game_id, r.team_id, r.depth_chart_position
+            FROM rosters r
+            JOIN games g ON g.season = r.season AND g.week = r.week
+                AND (g.home_team_id = r.team_id OR g.away_team_id = r.team_id)
+            WHERE r.depth_chart_rank = 1
+              AND r.depth_chart_position IN ('QB', 'RB', 'WR', 'CB')
+        """))
+        starters = pd.DataFrame(res.fetchall(), columns=list(res.keys()))
+    except Exception:
+        logger.exception("Failed to query depth chart starters for injury features")
+        return df
+
+    inj_df = out_reports.merge(starters, on=["player_id", "game_id"], how="inner")
+    if inj_df.empty:
+        return df
+    inj_df = inj_df.drop_duplicates(subset=["game_id", "team_id", "depth_chart_position"])
+
+    # df only carries team abbreviations (team_abbr / opponent_abbr), so
+    # resolve both to numeric team_id to compare against inj_df's team_id.
+    teams_lookup = pd.DataFrame(
+        db.execute(text("SELECT id AS team_id, abbreviation FROM teams")).fetchall(),
+        columns=["team_id", "abbreviation"],
+    )
+    df = df.merge(
+        teams_lookup.rename(columns={"abbreviation": "team_abbr", "team_id": "_own_team_id"}),
+        on="team_abbr", how="left",
+    )
+    df = df.merge(
+        teams_lookup.rename(columns={"abbreviation": "opponent_abbr", "team_id": "_opp_team_id"}),
+        on="opponent_abbr", how="left",
+    )
+
+    def _flag(position: str, team_id_col: str) -> np.ndarray:
+        subset = inj_df.loc[inj_df["depth_chart_position"] == position, ["game_id", "team_id"]].copy()
+        subset["_flag"] = True
+        subset = subset.rename(columns={"team_id": team_id_col})
+        merged = df[["game_id", team_id_col]].merge(subset, on=["game_id", team_id_col], how="left")
+        return merged["_flag"].fillna(False).astype(bool).values
+
+    df["qb_is_out"] = df["qb_is_out"].values | _flag("QB", "_own_team_id")
+    df["rb1_is_out"] = df["rb1_is_out"].values | _flag("RB", "_own_team_id")
+    df["wr1_is_out"] = df["wr1_is_out"].values | _flag("WR", "_own_team_id")
+    df["opp_cb1_is_out"] = _flag("CB", "_opp_team_id")
+
+    df = df.drop(columns=["_own_team_id", "_opp_team_id"])
 
     return df
 
@@ -482,6 +693,10 @@ def build_feature_matrix(
 # 7. Current Week Inference Feature Builder
 # ===========================================================================
 
+# How many players per team/position get a current-week prediction.
+_STARTERS_PER_POSITION = {"QB": 1, "RB": 2, "WR": 3, "TE": 2, "K": 1}
+
+
 def build_current_week_features(db: Session, season: int, week: int) -> pd.DataFrame:
     """
     Build features for upcoming week players using all prior completed historical games.
@@ -528,7 +743,8 @@ def build_current_week_features(db: Session, season: int, week: int) -> pd.DataF
             0.0 AS snap_pct,
             g.home_spread,
             g.game_total,
-            CASE WHEN r.team_id = g.home_team_id THEN 1 ELSE 0 END AS is_home
+            CASE WHEN r.team_id = g.home_team_id THEN 1 ELSE 0 END AS is_home,
+            r.depth_chart_rank
         FROM rosters r
         JOIN players p ON p.id = r.player_id
         JOIN teams   t ON t.id = r.team_id
@@ -542,20 +758,43 @@ def build_current_week_features(db: Session, season: int, week: int) -> pd.DataF
           AND p.position IN ('QB','WR','TE','RB','K')
           AND p.status = 'ACT'
           AND (
-              (p.position = 'QB' AND r.depth_chart_rank <= 1) OR
-              (p.position = 'RB' AND r.depth_chart_rank <= 2) OR
-              (p.position = 'WR' AND r.depth_chart_rank <= 3) OR
-              (p.position = 'TE' AND r.depth_chart_rank <= 2) OR
-              (p.position = 'K'  AND r.depth_chart_rank <= 1)
+              (p.position = 'QB' AND r.depth_chart_rank <= :qb_n) OR
+              (p.position = 'RB' AND r.depth_chart_rank <= :rb_n) OR
+              (p.position = 'WR' AND r.depth_chart_rank <= :wr_n) OR
+              (p.position = 'TE' AND r.depth_chart_rank <= :te_n) OR
+              (p.position = 'K'  AND r.depth_chart_rank <= :k_n)
           )
     """)
 
     try:
-        res = db.execute(upcoming_sql, {"season": season, "week": week})
+        # Pull a few extra depth-chart levels per position so backups are
+        # available to promote when starters are ruled out (trimmed below).
+        extra = {f"{pos.lower()}_n": n + 3 for pos, n in _STARTERS_PER_POSITION.items()}
+        res = db.execute(upcoming_sql, {"season": season, "week": week, **extra})
         df_upcoming = pd.DataFrame(res.fetchall(), columns=list(res.keys()))
     except Exception:
         logger.exception("Failed to query upcoming starters")
         return pd.DataFrame()
+
+    if df_upcoming.empty:
+        return pd.DataFrame()
+
+    # Drop anyone whose latest injury report rules them out of this game.
+    # Previously a starter listed Out still got a projection and his backup
+    # got none. The usual depth cutoff (_STARTERS_PER_POSITION) is extended by
+    # one rank per ruled-out player at that team/position, so the next man up
+    # takes the slot; with nobody out, the selection is exactly as before.
+    df_upcoming = df_upcoming.drop_duplicates(subset=["player_id", "game_id"])
+    out_reports = _latest_out_reports(db)
+    out_keys = set(zip(out_reports["player_id"], out_reports["game_id"]))
+    is_out = np.array(
+        [k in out_keys for k in zip(df_upcoming["player_id"], df_upcoming["game_id"])], dtype=bool
+    )
+    base_n = df_upcoming["position"].map(_STARTERS_PER_POSITION).fillna(0)
+    out_in_range = pd.Series(is_out & (df_upcoming["depth_chart_rank"] <= base_n).to_numpy(), index=df_upcoming.index)
+    n_out = out_in_range.groupby([df_upcoming["game_id"], df_upcoming["team_abbr"], df_upcoming["position"]]).transform("sum")
+    keep = (~is_out) & (df_upcoming["depth_chart_rank"] <= base_n + n_out)
+    df_upcoming = df_upcoming[keep].drop(columns=["depth_chart_rank"]).reset_index(drop=True)
 
     if df_upcoming.empty:
         return pd.DataFrame()
@@ -572,7 +811,7 @@ def build_current_week_features(db: Session, season: int, week: int) -> pd.DataF
     df_combined = add_rolling_usage_features(df_combined)
     df_combined = add_matchup_features(df_combined, db)
     df_combined = add_game_environment_features(df_combined, db)
-    df_combined = add_injury_features(df_combined, db)
+    df_combined = add_injury_features(df_combined, db, exclude_game_ids=upcoming_ids)
 
     df_inference = df_combined[df_combined["game_id"].isin(upcoming_ids)].copy()
 

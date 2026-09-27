@@ -95,7 +95,77 @@ def score_completed_games(db: Session) -> Dict[str, Any]:
         }
 
     db.commit()
+
+    alerts = check_performance_degradation(db)
+    if alerts:
+        results["degradation_alerts"] = alerts
+
     return results
+
+
+def check_performance_degradation(
+    db: Session,
+    lookback_weeks: int = 4,
+    degradation_threshold: float = 0.15,
+) -> List[Dict[str, Any]]:
+    """
+    Flag any prop whose most-recently-scored week is meaningfully worse
+    than its own trailing average from the lookback_weeks before it.
+
+    This is a different safety net than retrain.py's guardrail: that one
+    only fires the instant a *new* model is trained and compares against
+    the model it would replace. It says nothing about a model that's
+    already live and has just started drifting worse week over week (a
+    league-wide scheme change, an injury wave skewing usage, stale
+    calibration, etc.) without ever being retrained. This runs every time
+    score_completed_games() scores a newly-finished week, so drift in the
+    live model gets caught and logged even between retraining runs.
+    """
+    prop_types = [r[0] for r in db.query(ModelPerformance.prop_type).distinct().all()]
+    alerts: List[Dict[str, Any]] = []
+
+    for prop_type in prop_types:
+        rows = (
+            db.query(ModelPerformance)
+            .filter(ModelPerformance.prop_type == prop_type)
+            .order_by(ModelPerformance.season.desc(), ModelPerformance.week.desc())
+            .limit(lookback_weeks + 1)
+            .all()
+        )
+        if len(rows) < 2:
+            continue
+
+        metric = "brier_score" if prop_type == "anytime_td" else "mae"
+        latest = getattr(rows[0], metric)
+        baseline_vals = [getattr(r, metric) for r in rows[1:] if getattr(r, metric) is not None]
+        if latest is None or not baseline_vals:
+            continue
+
+        baseline_avg = float(np.mean(baseline_vals))
+        if baseline_avg <= 0:
+            continue
+
+        pct_change = (latest - baseline_avg) / baseline_avg
+        if pct_change > degradation_threshold:
+            alert = {
+                "prop_type": prop_type,
+                "metric": metric,
+                "latest": round(float(latest), 4),
+                "trailing_baseline": round(baseline_avg, 4),
+                "pct_worse": round(pct_change * 100, 1),
+                "season": rows[0].season,
+                "week": rows[0].week,
+                "lookback_weeks": len(baseline_vals),
+            }
+            alerts.append(alert)
+            logger.warning(
+                "Performance degradation detected for %s (season %d week %d): "
+                "latest %s=%.4f is %.1f%% worse than the trailing %d-week average of %.4f.",
+                prop_type, rows[0].season, rows[0].week, metric, latest,
+                pct_change * 100, len(baseline_vals), baseline_avg,
+            )
+
+    return alerts
 
 
 def get_calibration_data(db: Session, prop_type: str = "anytime_td") -> List[Dict[str, Any]]:
