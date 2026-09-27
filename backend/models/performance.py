@@ -70,6 +70,18 @@ def score_completed_games(db: Session) -> Dict[str, Any]:
         y_pred = np.array([x["pred"] for x in pairs])
         y_true = np.array([x["actual"] for x in pairs])
 
+        # Replace any earlier score for this prop/week rather than appending
+        # another row. Every run re-scores every final game, so appending left
+        # duplicate rows per week (which also skewed the degradation baseline),
+        # and a week first scored after only its Thursday game never got
+        # updated once the rest of its games finished.
+        db.query(ModelPerformance).filter(
+            ModelPerformance.model_version == "1.0",
+            ModelPerformance.prop_type == prop_type,
+            ModelPerformance.season == season,
+            ModelPerformance.week == week,
+        ).delete(synchronize_session=False)
+
         record = ModelPerformance(
             model_version="1.0",
             prop_type=prop_type,
@@ -107,6 +119,7 @@ def check_performance_degradation(
     db: Session,
     lookback_weeks: int = 4,
     degradation_threshold: float = 0.15,
+    min_predictions: int = 30,
 ) -> List[Dict[str, Any]]:
     """
     Flag any prop whose most-recently-scored week is meaningfully worse
@@ -120,28 +133,66 @@ def check_performance_degradation(
     calibration, etc.) without ever being retrained. This runs every time
     score_completed_games() scores a newly-finished week, so drift in the
     live model gets caught and logged even between retraining runs.
+
+    A week is only judged once it has enough scored predictions: at least
+    min_predictions, and at least half the typical count of the baseline
+    weeks. Otherwise a week scored after just its Thursday game (e.g. 5
+    rushing predictions, one of them a 194-yard outlier) gets compared
+    against full 120-prediction weeks and raises a false alarm. The
+    baseline is weighted by each week's prediction count for the same
+    reason, and uses only the newest row per (season, week).
     """
     prop_types = [r[0] for r in db.query(ModelPerformance.prop_type).distinct().all()]
     alerts: List[Dict[str, Any]] = []
 
     for prop_type in prop_types:
-        rows = (
+        metric = "brier_score" if prop_type == "anytime_td" else "mae"
+
+        all_rows = (
             db.query(ModelPerformance)
             .filter(ModelPerformance.prop_type == prop_type)
-            .order_by(ModelPerformance.season.desc(), ModelPerformance.week.desc())
-            .limit(lookback_weeks + 1)
+            .order_by(
+                ModelPerformance.season.desc(),
+                ModelPerformance.week.desc(),
+                ModelPerformance.evaluated_at.desc(),
+                ModelPerformance.id.desc(),
+            )
             .all()
         )
+
+        # Newest row per (season, week), in newest-week-first order, keeping
+        # only weeks that actually have this metric.
+        rows = []
+        seen = set()
+        for r in all_rows:
+            key = (r.season, r.week)
+            if key in seen:
+                continue
+            seen.add(key)
+            if getattr(r, metric) is not None and (r.n_predictions or 0) > 0:
+                rows.append(r)
+            if len(rows) >= lookback_weeks + 1:
+                break
+
         if len(rows) < 2:
             continue
 
-        metric = "brier_score" if prop_type == "anytime_td" else "mae"
-        latest = getattr(rows[0], metric)
-        baseline_vals = [getattr(r, metric) for r in rows[1:] if getattr(r, metric) is not None]
-        if latest is None or not baseline_vals:
+        latest_row, baseline_rows = rows[0], rows[1:]
+        baseline_n = [r.n_predictions for r in baseline_rows]
+        required_n = max(min_predictions, int(0.5 * float(np.median(baseline_n))))
+        if latest_row.n_predictions < required_n:
+            logger.info(
+                "Skipping degradation check for %s season %d week %d: only %d scored "
+                "predictions so far (need %d).",
+                prop_type, latest_row.season, latest_row.week,
+                latest_row.n_predictions, required_n,
+            )
             continue
 
-        baseline_avg = float(np.mean(baseline_vals))
+        latest = float(getattr(latest_row, metric))
+        baseline_avg = float(np.average(
+            [getattr(r, metric) for r in baseline_rows], weights=baseline_n
+        ))
         if baseline_avg <= 0:
             continue
 
@@ -150,19 +201,20 @@ def check_performance_degradation(
             alert = {
                 "prop_type": prop_type,
                 "metric": metric,
-                "latest": round(float(latest), 4),
+                "latest": round(latest, 4),
                 "trailing_baseline": round(baseline_avg, 4),
                 "pct_worse": round(pct_change * 100, 1),
-                "season": rows[0].season,
-                "week": rows[0].week,
-                "lookback_weeks": len(baseline_vals),
+                "season": latest_row.season,
+                "week": latest_row.week,
+                "n_predictions": latest_row.n_predictions,
+                "lookback_weeks": len(baseline_rows),
             }
             alerts.append(alert)
             logger.warning(
-                "Performance degradation detected for %s (season %d week %d): "
+                "Performance degradation detected for %s (season %d week %d, n=%d): "
                 "latest %s=%.4f is %.1f%% worse than the trailing %d-week average of %.4f.",
-                prop_type, rows[0].season, rows[0].week, metric, latest,
-                pct_change * 100, len(baseline_vals), baseline_avg,
+                prop_type, latest_row.season, latest_row.week, latest_row.n_predictions,
+                metric, latest, pct_change * 100, len(baseline_rows), baseline_avg,
             )
 
     return alerts
