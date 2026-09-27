@@ -359,7 +359,32 @@ def add_matchup_features(df: pd.DataFrame, db: Session) -> pd.DataFrame:
             ascending=True, method="average", na_option="keep"
         )
 
-    def_slim = def_df[["defense_team", "season", "week"] + matchup_cols].rename(
+    # Carry each defense's rank forward to weeks it hasn't played yet.
+    #
+    # def_df only has a (team, season, week) row once THAT team's game for
+    # that week is complete and recorded in player_game_stats. On any normal
+    # Sunday morning, most of the league hasn't played its week-N game yet,
+    # so an exact-match merge on (opponent_abbr, season, week) misses nearly
+    # every team for the upcoming week and everyone silently falls back to
+    # the neutral 16.0 — meaning the opponent-strength adjustment was a
+    # no-op for almost every current-week prediction. Forward-filling each
+    # team's most recent known rank (which already reflects only games
+    # through the prior week, thanks to the shift(1) above) onto every
+    # later week fixes that without introducing any leakage: the value used
+    # for an upcoming game is always the defense's rank as of its last
+    # completed game, never a game that hasn't happened yet.
+    teams_seasons = def_df[["defense_team", "season"]].drop_duplicates()
+    max_week = int(max(df["week"].max(), def_df["week"].max()))
+    week_grid = pd.DataFrame({"week": range(1, max_week + 1)})
+    grid = teams_seasons.merge(week_grid, how="cross")
+    def_full = grid.merge(
+        def_df[["defense_team", "season", "week"] + matchup_cols],
+        on=["defense_team", "season", "week"],
+        how="left",
+    ).sort_values(["defense_team", "season", "week"])
+    def_full[matchup_cols] = def_full.groupby(["defense_team", "season"])[matchup_cols].ffill()
+
+    def_slim = def_full[["defense_team", "season", "week"] + matchup_cols].rename(
         columns={"defense_team": "opponent_abbr"}
     )
     df = df.merge(def_slim, on=["opponent_abbr", "season", "week"], how="left")
@@ -406,33 +431,83 @@ def add_game_environment_features(df: pd.DataFrame, db: Session) -> pd.DataFrame
 # ===========================================================================
 
 def add_injury_features(df: pd.DataFrame, db: Session) -> pd.DataFrame:
-    """Pre-kickoff injury status tags."""
+    """
+    Pre-kickoff injury status tags: whether each side's starting QB/RB1/WR1,
+    or the opponent's starting CB1, is ruled Out/Doubtful/IR for this game.
+
+    Previously this queried inj_df and then discarded it, hardcoding every
+    flag to False no matter what the injury report actually said — a dead
+    stub. That was compounded by ingest_injuries() never setting game_id on
+    the rows it inserted, so even a correct query here would have matched
+    nothing (see the WHERE i.game_id IS NOT NULL below). Both are fixed now:
+    injuries.py resolves each report to the player's next unplayed game, and
+    this function actually uses the result.
+    """
     if df.empty:
         return df
+
+    df["qb_is_out"] = False
+    df["rb1_is_out"] = False
+    df["wr1_is_out"] = False
+    df["opp_cb1_is_out"] = False
 
     sql = text("""
         SELECT
             i.game_id,
-            p.position,
             r.team_id,
-            r.depth_chart_rank,
-            i.game_status
+            r.depth_chart_position,
+            r.depth_chart_rank
         FROM injuries i
-        JOIN players p ON p.id = i.player_id
-        LEFT JOIN rosters r ON r.player_id = i.player_id
-        WHERE i.game_id IS NOT NULL AND i.game_status IN ('Out', 'Doubtful', 'IR')
+        JOIN rosters r ON r.player_id = i.player_id
+        WHERE i.game_id IS NOT NULL
+          AND i.game_status IN ('Out', 'Doubtful', 'IR')
+          AND r.depth_chart_rank = 1
+          AND r.depth_chart_position IN ('QB', 'RB', 'WR', 'CB')
     """)
 
     try:
         res = db.execute(sql)
         inj_df = pd.DataFrame(res.fetchall(), columns=list(res.keys()))
     except Exception:
-        inj_df = pd.DataFrame()
+        logger.exception("Failed to query injury features")
+        return df
 
-    df["qb_is_out"] = False
-    df["rb1_is_out"] = False
-    df["wr1_is_out"] = False
-    df["opp_cb1_is_out"] = False
+    if inj_df.empty:
+        return df
+
+    # A player can carry more than one roster snapshot (weekly depth-chart
+    # refreshes); de-dupe to one row per (game, team, position) since they'd
+    # all resolve to the same "starter is out" flag anyway.
+    inj_df = inj_df.drop_duplicates(subset=["game_id", "team_id", "depth_chart_position"])
+
+    # df only carries team abbreviations (team_abbr / opponent_abbr), so
+    # resolve both to numeric team_id to compare against inj_df's team_id.
+    teams_lookup = pd.DataFrame(
+        db.execute(text("SELECT id AS team_id, abbreviation FROM teams")).fetchall(),
+        columns=["team_id", "abbreviation"],
+    )
+    df = df.merge(
+        teams_lookup.rename(columns={"abbreviation": "team_abbr", "team_id": "_own_team_id"}),
+        on="team_abbr", how="left",
+    )
+    df = df.merge(
+        teams_lookup.rename(columns={"abbreviation": "opponent_abbr", "team_id": "_opp_team_id"}),
+        on="opponent_abbr", how="left",
+    )
+
+    def _flag(position: str, team_id_col: str) -> pd.Series:
+        subset = inj_df.loc[inj_df["depth_chart_position"] == position, ["game_id", "team_id"]].copy()
+        subset["_flag"] = True
+        subset = subset.rename(columns={"team_id": team_id_col})
+        merged = df[["game_id", team_id_col]].merge(subset, on=["game_id", team_id_col], how="left")
+        return merged["_flag"].fillna(False).astype(bool).values
+
+    df["qb_is_out"] = _flag("QB", "_own_team_id")
+    df["rb1_is_out"] = _flag("RB", "_own_team_id")
+    df["wr1_is_out"] = _flag("WR", "_own_team_id")
+    df["opp_cb1_is_out"] = _flag("CB", "_opp_team_id")
+
+    df = df.drop(columns=["_own_team_id", "_opp_team_id"])
 
     return df
 
