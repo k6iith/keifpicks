@@ -9,7 +9,7 @@ from __future__ import annotations
 import logging
 import math
 from datetime import datetime, timezone
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import select
@@ -76,8 +76,10 @@ def _build_prop_cards(
             ),
         )
     )
-    if prop_types:
-        stmt = stmt.where(Prediction.prop_type.in_(prop_types))
+    # Build every prop type even when the caller only wants some of them: a
+    # not-optimal card's "safer pick" can be another of the player's props
+    # (e.g. his receptions when his rushing yards is the page being viewed).
+    # The requested prop_types are applied at the end.
 
     predictions = db.execute(stmt).scalars().unique().all()
 
@@ -93,8 +95,6 @@ def _build_prop_cards(
 
     # Fetch available market lines
     ml_stmt = select(MarketLine).where(MarketLine.game_id.in_(game_ids))
-    if prop_types:
-        ml_stmt = ml_stmt.where(MarketLine.prop_type.in_(prop_types))
     market_lines = db.execute(ml_stmt).scalars().all()
 
     ml_lookup = {}
@@ -247,7 +247,59 @@ def _build_prop_cards(
             )
         )
 
+    _attach_safer_picks(cards)
+    if prop_types:
+        cards = [c for c in cards if c.prop_type in prop_types]
     return cards
+
+
+_PROP_LABELS = {
+    "passing_yards": "Passing Yds",
+    "passing_tds": "Passing TDs",
+    "rushing_yards": "Rushing Yds",
+    "rushing_attempts": "Rush Attempts",
+    "receiving_yards": "Receiving Yds",
+    "receptions": "Receptions",
+    "anytime_td": "Anytime TD",
+}
+
+
+def _pick_text(card: PropCard) -> str:
+    label = _PROP_LABELS.get(card.prop_type, card.prop_type.replace("_", " ").title())
+    if card.prop_type == "anytime_td":
+        return f"{label} YES"
+    line = f" {card.market_line:g}" if card.market_line is not None else ""
+    return f"{label} {(card.play_side or '').upper()}{line}"
+
+
+def _attach_safer_picks(cards: List[PropCard]) -> None:
+    """
+    For each not-optimal card, point to the same player's best-rated OTHER
+    prop in the same game: an optimal one if he has any (highest score first),
+    else a lean scoring 55+. Otherwise the answer is to pass. The opposite
+    side of the same prop is never offered: the model already rates that side
+    as less likely, so it isn't "safer", just the other way to lose.
+    """
+    by_player: Dict[tuple, List[PropCard]] = {}
+    for c in cards:
+        by_player.setdefault((c.player.id, c.game.id if c.game else None), []).append(c)
+
+    for group in by_player.values():
+        for c in group:
+            if c.play_rating != "not_optimal":
+                continue
+            others = [o for o in group if o is not c and o.play_rating in ("optimal", "lean")]
+            optimal = sorted((o for o in others if o.play_rating == "optimal"), key=lambda o: -(o.play_score or 0))
+            leans = sorted((o for o in others if o.play_rating == "lean" and (o.play_score or 0) >= 55),
+                           key=lambda o: -(o.play_score or 0))
+            best = (optimal or leans or [None])[0]
+            if best is None:
+                c.safer_pick = "Pass"
+                c.safer_pick_detail = "No better-rated play for this player this week."
+            else:
+                verdict = "Optimal" if best.play_rating == "optimal" else "Lean"
+                c.safer_pick = _pick_text(best)
+                c.safer_pick_detail = f"{verdict}, score {round(best.play_score or 0)}: {best.play_summary or ''}".strip()
 
 
 def _get_today_game_ids(db: Session) -> List[int]:

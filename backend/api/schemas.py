@@ -239,6 +239,11 @@ class PropCard(BaseModel):
         default_factory=list,
         description="Usage, injury, defense, recent-form, game-script and market factors behind the rating",
     )
+    safer_pick: Optional[str] = Field(
+        None,
+        description="For not-optimal plays: the player's best-rated other prop this game, or 'Pass'",
+    )
+    safer_pick_detail: Optional[str] = None
     data_quality_score: Optional[float] = Field(
         None, description="0-1 score reflecting data freshness and completeness"
     )
