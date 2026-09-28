@@ -18,6 +18,7 @@ from sqlalchemy.orm import Session, joinedload
 from backend.api.schemas import DataUnavailable, ParlayLeg, PlayOfTheWeek, PropCard, PropList
 from backend.db.database import get_db
 from backend.db.models import Game, MarketLine, Player, Prediction, Team
+from backend.models.play_rating import PlayContext, rate_play
 from backend.models.predictor import calculate_over_under_probability
 from backend.ingestion.injury_status import ruled_out_player_games
 from backend.ingestion.nfl_data import _current_season, _current_nfl_week
@@ -103,6 +104,7 @@ def _build_prop_cards(
             ml_lookup[key] = ml
 
     cards: List[PropCard] = []
+    play_ctx = PlayContext(db, game_ids, [p.player_id for p in predictions])
 
     for pred in predictions:
         player = pred.player
@@ -182,40 +184,27 @@ def _build_prop_cards(
         else:
             conf_val = 50.0
 
-        # Situational Feature Diagnostics (Model Explainability)
-        inc_factors = []
-        dec_factors = []
-
-        if pred.prop_type == "passing_yards":
-            if (line_diff or 0) >= 0:
-                inc_factors.append("Top-tier historical passing baseline (3-wk weighted)")
-                inc_factors.append("Opponent defensive pass rush efficiency rating")
-                dec_factors.append("Red zone scoring drive rushing tendency")
-            else:
-                inc_factors.append("Controlled short-to-intermediate target share")
-                dec_factors.append("Top-10 ranked opponent secondary coverage")
-                dec_factors.append("Projected positive game script favoring ground attack")
-        elif pred.prop_type == "rushing_yards":
-            if (line_diff or 0) >= 0:
-                inc_factors.append("High projected carry share (>60% backfield volume)")
-                inc_factors.append("Favorable defensive run-stop rate matchup")
-                dec_factors.append("Passing down 3rd-and-long substitutions")
-            else:
-                inc_factors.append("Goal-line and short-yardage situational priority")
-                dec_factors.append("Heavy defensive front-7 box counts")
-                dec_factors.append("Projected trailing game script reducing rushing volume")
-        elif pred.prop_type in ["receiving_yards", "receptions"]:
-            if (line_diff or 0) >= 0:
-                inc_factors.append("Primary target share (>22% team pass attempts)")
-                inc_factors.append("High route participation & air-yards distribution")
-                dec_factors.append("Bracket safety coverage on deep third routes")
-            else:
-                inc_factors.append("Reliable early-down target design")
-                dec_factors.append("Opponent perimeter shutdown coverage")
-                dec_factors.append("Run-heavy offensive gameplan script")
-        elif pred.prop_type == "anytime_td":
-            inc_factors.append("Red-zone high-leverage target designation")
-            dec_factors.append("Defensive goal-to-go stop efficiency")
+        # Play rating: real usage / injury / defense / recent-game / market
+        # factors (backend/models/play_rating.py). These also replace the old
+        # increasing/decreasing factor lists, which were canned text picked
+        # only by the sign of line_diff (every RB projected over got "High
+        # projected carry share (>60% backfield volume)", backups included).
+        rating = rate_play(
+            play_ctx,
+            player_id=pred.player_id,
+            player_name=player.full_name if player else "",
+            position=player.position if player else "",
+            team_id=team.id if team else None,
+            game_id=pred.game_id,
+            prop_type=pred.prop_type,
+            projection=pred.projection,
+            market_line=line_val,
+            has_real_line=ml is not None,
+            over_probability=over_prob,
+            market_over_prob=_market_implied_prob(over_odds) if over_odds is not None else None,
+        )
+        inc_factors = rating.increasing
+        dec_factors = rating.decreasing
 
         cards.append(
             PropCard(
@@ -246,6 +235,11 @@ def _build_prop_cards(
                 game_script_adjustment=1.0,
                 increasing_factors=inc_factors,
                 decreasing_factors=dec_factors,
+                play_side=rating.play_side,
+                play_rating=rating.play_rating,
+                play_score=rating.play_score,
+                play_summary=rating.play_summary,
+                play_factors=[f.as_dict() for f in rating.play_factors],
                 data_quality_score=round(dq_score, 3),
                 last_updated=pred.prediction_created_at,
                 model_version=pred.model_version,
@@ -345,6 +339,11 @@ def _build_play_of_week(
         # not a genuine mispriced bet.
         if prob is None or prob < 0.15 or prob > 0.72 or edge is None or edge < 0.02:
             continue
+        # Never build the parlay out of legs the play rating flags as not
+        # optimal (injury designation, volatile role far from the book, ...),
+        # or legs whose preferred side disagrees with the one picked here.
+        if c.play_rating == "not_optimal" or (c.play_side and c.play_side != side):
+            continue
 
         candidates.append({"card": c, "side": side, "prob": prob, "edge": edge, "decimal": 1.0 / prob})
 
@@ -413,6 +412,8 @@ def _build_play_of_week(
                 american_odds=_decimal_to_american(leg["decimal"]),
                 model_edge=round(leg["edge"], 4),
                 game_week=c.game.week if c.game else None,
+                play_rating=c.play_rating,
+                play_summary=c.play_summary,
             )
         )
 
