@@ -367,7 +367,11 @@
         const sideTxt = p.play_side ? (p.play_side === 'yes' ? 'YES' : p.play_side.toUpperCase()) : '';
         const ratingCell = '<div class="flex flex-col items-center" title="' + esc(p.play_summary) + '">' +
           '<span class="inline-flex items-center px-2 py-0.5 rounded text-[10px] font-bold border ' + rs[1] + '">' + rs[0] + '</span>' +
-          (sideTxt ? '<span class="text-[10px] text-slate-400 font-mono mt-0.5">' + sideTxt + (p.play_score != null ? ' · ' + Math.round(p.play_score) : '') + '</span>' : '') +
+          (p.play_rating === 'not_optimal'
+            ? '<span class="text-[10px] text-slate-500 font-mono mt-0.5">leans ' + sideTxt + ' · skip</span>' +
+              '<span class="text-[10px] font-bold mt-0.5 ' + (p.safer_pick === 'Pass' ? 'text-slate-300' : 'text-emerald-400') + '" title="' + esc(p.safer_pick_detail) + '">' +
+                (p.safer_pick === 'Pass' ? 'Safer: Pass' : 'Safer: ' + esc(p.safer_pick || 'Pass')) + '</span>'
+            : (sideTxt ? '<span class="text-[10px] text-slate-400 font-mono mt-0.5">' + (p.play_rating === 'lean' ? 'leans ' : '') + sideTxt + (p.play_score != null ? ' · ' + Math.round(p.play_score) : '') + '</span>' : '')) +
           '</div>';
         const impactStyle = {supports: ['✅', 'text-emerald-300'], against: ['⚠️', 'text-amber-300'], risk: ['⛔', 'text-red-300'], info: ['ℹ️', 'text-slate-300']};
         const factorsList = (p.play_factors || []).map(f => {
@@ -416,6 +420,7 @@
             '<details class="cursor-pointer"><summary class="text-cyan-400 hover:underline select-none">N=' + sampleSz + ' ℹ️</summary>' +
             '<div class="mt-1 text-left bg-slate-950 p-2.5 rounded-md border border-slate-800 space-y-1 font-sans text-[11px] whitespace-normal">' +
               '<div class="text-slate-100 font-bold">' + esc(p.play_summary || 'Play factors') + '</div>' +
+              (p.play_rating === 'not_optimal' ? '<div class="text-emerald-400 mt-1">Safer pick: <b>' + esc(p.safer_pick || 'Pass') + '</b>' + (p.safer_pick_detail ? ' <span class="text-slate-400">(' + esc(p.safer_pick_detail) + ')</span>' : '') + '<div class="text-slate-500 text-[10px]">No bet is guaranteed; this is the best-rated alternative the model sees.</div></div>' : '') +
               '<ul class="space-y-0.5 mt-1">' + (factorsList || '<li class="text-slate-400">No situational factors available.</li>') + '</ul>' +
             '</div></details>' +
           '</td>' +
