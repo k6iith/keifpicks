@@ -134,7 +134,16 @@ def generate_predictions_for_features(
             else:
                 preds = np.maximum(0.0, model.predict(X_mat))
 
-                # Empirical calibration: nudge model projections to correct a
+                # Mean-bias correction measured on held-out games at training
+                # time (trainer._calibration_ratio), stored in the model's
+                # meta. The hardcoded percentages below are only a fallback
+                # for model files trained before that existed: they were set
+                # against an older model and had drifted badly (+20% on
+                # rushing_yards when the model was already ~4% high, which
+                # alone put Tank Bigsby's projection at 43 vs a 12.5 line;
+                # +35% on rushing_attempts when it was ~7% low).
+                #
+                # Empirical calibration (legacy): nudge model projections to correct a
                 # systematic bias measured against actual outcomes.
                 #
                 # This used to be a flat additive offset (e.g. always +11.0
@@ -157,7 +166,9 @@ def generate_predictions_for_features(
                     "rushing_attempts": 4.5 / 13.0,    # ~+34.6%
                     "passing_tds": 0.6 / 1.6,          # ~+37.5%
                 }
-                if prop in prop_calibration_pcts:
+                if meta.get("calibration_ratio") is not None:
+                    preds = np.maximum(0.0, preds * float(meta["calibration_ratio"]))
+                elif prop in prop_calibration_pcts:
                     preds = np.maximum(0.0, preds * (1.0 + prop_calibration_pcts[prop]))
 
                 residual_std = float(meta.get("residual_std", 15.0))

@@ -65,14 +65,28 @@ def normalize_player_name(name: str) -> str:
 def _pick_best(db: Session, candidates: List[Player]) -> Optional[Player]:
     """
     Given multiple Player rows that all match the same (normalized) name,
-    pick the one the rest of the app is actually using: the one with a
-    current model prediction. Falls back to an active-roster player, then
-    just the first candidate, so we always return something deterministic.
+    pick the canonical one.
+
+    First preference: rows with a real NFL gsis_id over "ESPN_..." rows the
+    ESPN sync created as placeholders. Box-score stats are ingested against
+    the gsis_id row, so attaching the depth chart/predictions to an ESPN
+    placeholder cuts the player off from his recent games (James Cook's
+    2025-26 stats sit on "James Cook" while predictions went to the
+    "James Cook III" placeholder, whose latest games were from 2024 —
+    projecting him at ~32 rushing yards against a ~80-yard line). This used
+    to prefer whichever row already had current predictions, which made a
+    wrong pick permanent. That is now only a later tie-breaker.
     """
     if not candidates:
         return None
     if len(candidates) == 1:
         return candidates[0]
+
+    canonical = [c for c in candidates if c.gsis_id and not str(c.gsis_id).startswith("ESPN_")]
+    if len(canonical) == 1:
+        return canonical[0]
+    if canonical:
+        candidates = canonical
 
     ids = [c.id for c in candidates]
     current_ids = {
