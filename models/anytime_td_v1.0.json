@@ -28,6 +28,6 @@
   "brier_score": 0.13,
   "log_loss": 0.4163,
   "baseline_brier": 0.1463,
-  "trained_at": "2026-09-28T21:51:22.283596",
+  "trained_at": "2026-09-28T22:06:15.993554",
   "n_samples": 21598
 }

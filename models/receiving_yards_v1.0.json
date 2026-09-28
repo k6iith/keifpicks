@@ -34,6 +34,7 @@
   "baseline_mae": 16.9,
   "baseline_rmse": 24.84,
   "residual_std": 24.5,
-  "trained_at": "2026-09-28T21:51:20.512474",
+  "calibration_ratio": 0.9457,
+  "trained_at": "2026-09-28T22:06:14.168319",
   "n_samples": 18743
 }
