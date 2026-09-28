@@ -19,6 +19,7 @@ from backend.api.schemas import DataUnavailable, ParlayLeg, PlayOfTheWeek, PropC
 from backend.db.database import get_db
 from backend.db.models import Game, MarketLine, Player, Prediction, Team
 from backend.models.predictor import calculate_over_under_probability
+from backend.ingestion.injury_status import ruled_out_player_games
 from backend.ingestion.nfl_data import _current_season, _current_nfl_week
 
 logger = logging.getLogger(__name__)
@@ -78,6 +79,14 @@ def _build_prop_cards(
         stmt = stmt.where(Prediction.prop_type.in_(prop_types))
 
     predictions = db.execute(stmt).scalars().unique().all()
+
+    # Hide anyone the latest injury report rules out of this game. Predictions
+    # are only regenerated Tuesday/Friday, but injury reports are ingested
+    # hourly, so without this a player ruled out on game day (e.g. a QB
+    # scratched hours before Monday Night Football) kept showing props.
+    ruled_out = ruled_out_player_games(db, game_ids)
+    if ruled_out:
+        predictions = [p for p in predictions if (p.player_id, p.game_id) not in ruled_out]
     if not predictions:
         return []
 

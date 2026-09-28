@@ -15,13 +15,15 @@
     "passing_tds_weighted_baseline",
     "passing_yards_3wk",
     "attempts_3wk",
-    "opp_pass_yards_allowed_rank"
+    "opp_pass_yards_allowed_rank",
+    "qb_is_out"
   ],
-  "mae": 0.92,
-  "rmse": 1.21,
-  "baseline_mae": 0.84,
-  "baseline_rmse": 1.11,
+  "mae": 0.89,
+  "rmse": 1.17,
+  "baseline_mae": 0.85,
+  "baseline_rmse": 1.13,
   "residual_std": 1.16,
-  "trained_at": "2026-09-25T02:37:25.283809",
-  "n_samples": 1957
+  "calibration_ratio": 1.0,
+  "trained_at": "2026-09-28T22:06:08.380523",
+  "n_samples": 2698
 }
