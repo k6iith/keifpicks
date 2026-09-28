@@ -21,13 +21,15 @@
     "yards_per_carry",
     "rushing_yards_trend",
     "snap_pct_4wk",
-    "opp_rush_yards_allowed_rank"
+    "opp_rush_yards_allowed_rank",
+    "rb1_is_out",
+    "qb_is_out"
   ],
-  "mae": 19.06,
-  "rmse": 26.71,
-  "baseline_mae": 18.86,
-  "baseline_rmse": 26.88,
-  "residual_std": 26.68,
-  "trained_at": "2026-09-26T19:43:01.338538",
+  "mae": 18.28,
+  "rmse": 26.83,
+  "baseline_mae": 17.95,
+  "baseline_rmse": 26.94,
+  "residual_std": 26.81,
+  "trained_at": "2026-09-28T21:51:17.370464",
   "n_samples": 8580
 }
