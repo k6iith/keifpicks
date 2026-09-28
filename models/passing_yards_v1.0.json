@@ -20,13 +20,14 @@
     "completion_pct",
     "yards_per_attempt",
     "passing_yards_trend",
-    "opp_pass_yards_allowed_rank"
+    "opp_pass_yards_allowed_rank",
+    "qb_is_out"
   ],
-  "mae": 68.06,
-  "rmse": 87.26,
-  "baseline_mae": 68.6,
-  "baseline_rmse": 89.58,
-  "residual_std": 87.16,
-  "trained_at": "2026-09-25T02:37:24.010429",
-  "n_samples": 1957
+  "mae": 68.86,
+  "rmse": 88.71,
+  "baseline_mae": 71.45,
+  "baseline_rmse": 93.24,
+  "residual_std": 88.18,
+  "trained_at": "2026-09-28T21:51:12.627268",
+  "n_samples": 2698
 }

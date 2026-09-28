@@ -28,6 +28,8 @@ import pandas as pd
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
+from backend.ingestion.injury_status import ruled_out_player_games
+
 logger = logging.getLogger(__name__)
 
 STAT_COLS = [
@@ -207,11 +209,25 @@ def add_rolling_usage_features(df: pd.DataFrame) -> pd.DataFrame:
     }
 
     def _usage_baseline(series: pd.Series) -> pd.Series:
-        # Prior-game expanding median of the player's own usage, so the
-        # threshold adapts to their normal workload instead of a league-wide
-        # number that wouldn't mean the same thing for a starter vs. a
-        # committee back.
-        return series.shift(1).expanding(min_periods=3).median()
+        # Median of the player's own usage over his previous 8 games, so the
+        # threshold adapts to his CURRENT role. This used to be a career-long
+        # expanding median, which broke for anyone whose role shrank: Tank
+        # Bigsby's career median came from his Jacksonville starter years, so
+        # nearly every Philadelphia backup game (1-4 carries) was treated as a
+        # "diminished" outlier and dropped, leaving only his rare 13-16 carry
+        # games in his recent form and inflating his rushing projection ~3x.
+        return series.shift(1).rolling(8, min_periods=3).median()
+
+    # Snap share is what actually distinguishes an injury exit (starter
+    # plays 10% of snaps instead of his usual 90%) from a normal low-usage
+    # game for a backup (10% of snaps, as usual). When snap data exists for
+    # both the game and the baseline, require snaps to have collapsed too.
+    snap_baseline = player_grp["snap_pct"].transform(_usage_baseline) if "snap_pct" in df.columns else None
+    if snap_baseline is not None:
+        has_snaps = (snap_baseline > 0) & (df["snap_pct"] > 0)
+        snaps_collapsed = ~has_snaps | (df["snap_pct"] < 0.5 * snap_baseline)
+    else:
+        snaps_collapsed = pd.Series(True, index=df.index)
 
     diminished_masks: dict[str, pd.Series] = {}
     for ucol in set(_USAGE_COL_FOR_STAT.values()):
@@ -221,7 +237,7 @@ def add_rolling_usage_features(df: pd.DataFrame) -> pd.DataFrame:
         # Only flag once we actually have an established baseline (3+ prior
         # games) — otherwise every player's early-career games would get
         # flagged for lack of comparison.
-        diminished_masks[ucol] = baseline.notna() & (df[ucol] < 0.35 * baseline)
+        diminished_masks[ucol] = baseline.notna() & (df[ucol] < 0.35 * baseline) & snaps_collapsed
 
     tracked_stats = [
         "passing_yards", "rushing_yards", "receiving_yards", "receptions",
@@ -443,44 +459,17 @@ def add_game_environment_features(df: pd.DataFrame, db: Session) -> pd.DataFrame
 # 5. Injury Features
 # ===========================================================================
 
-# ESPN spells statuses out ("Injured Reserve", not "IR") and wording/case has
-# shifted over time, so match on a normalized form rather than exact strings.
-_OUT_STATUSES = ("out", "doubtful", "ir", "injured reserve", "physically unable to perform", "pup", "suspended", "suspension")
-
-
-def _is_out_status(status: Optional[str]) -> bool:
-    # Whole-word match so e.g. "IR - Designated to Return" or "Out (Season)"
-    # count, but an unrelated word that merely starts with "out" doesn't.
-    s = " ".join((status or "").strip().lower().replace("-", " ").replace("(", " ").split())
-    return any(s == p or s.startswith(p + " ") for p in _OUT_STATUSES)
-
-
 def _latest_out_reports(db: Session) -> pd.DataFrame:
     """
-    One row per (player, game) whose MOST RECENT injury report rules them
-    out (Out/Doubtful/IR/...). Using only the latest report matters: a player
-    listed Out on Wednesday but cleared by Friday must not stay flagged.
-    Columns: player_id, game_id.
+    One row per (player, game) whose most recent injury report rules them
+    out (see backend.ingestion.injury_status). Columns: player_id, game_id.
     """
-    sql = text("""
-        SELECT player_id, game_id, game_status, report_date, id
-        FROM injuries
-        WHERE game_id IS NOT NULL
-    """)
     try:
-        res = db.execute(sql)
-        rep = pd.DataFrame(res.fetchall(), columns=list(res.keys()))
+        pairs = ruled_out_player_games(db)
     except Exception:
         logger.exception("Failed to query injury reports")
-        return pd.DataFrame(columns=["player_id", "game_id"])
-
-    if rep.empty:
-        return pd.DataFrame(columns=["player_id", "game_id"])
-
-    rep = rep.sort_values(["player_id", "game_id", "report_date", "id"])
-    rep = rep.drop_duplicates(subset=["player_id", "game_id"], keep="last")
-    rep = rep[rep["game_status"].map(_is_out_status)]
-    return rep[["player_id", "game_id"]].reset_index(drop=True)
+        pairs = set()
+    return pd.DataFrame(sorted(pairs), columns=["player_id", "game_id"])
 
 
 # Position -> (usage column that identifies the starter, own-team flag)

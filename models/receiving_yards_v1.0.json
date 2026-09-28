@@ -25,13 +25,15 @@
     "snap_pct_4wk",
     "opp_pass_yards_allowed_rank",
     "opp_targets_allowed_to_wr_rank",
-    "opp_targets_allowed_to_te_rank"
+    "opp_targets_allowed_to_te_rank",
+    "wr1_is_out",
+    "qb_is_out"
   ],
-  "mae": 18.26,
-  "rmse": 26.43,
-  "baseline_mae": 18.94,
-  "baseline_rmse": 27.74,
-  "residual_std": 26.42,
-  "trained_at": "2026-09-26T19:43:02.746995",
+  "mae": 17.13,
+  "rmse": 24.54,
+  "baseline_mae": 16.9,
+  "baseline_rmse": 24.84,
+  "residual_std": 24.5,
+  "trained_at": "2026-09-28T21:51:20.512474",
   "n_samples": 18743
 }
