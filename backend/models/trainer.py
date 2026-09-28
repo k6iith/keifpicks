@@ -201,6 +201,25 @@ PROP_FEATURE_REGISTRY: Dict[str, List[str]] = {
 }
 
 
+# Below this many validation samples the measured bias is mostly week-to-week
+# noise (QB props have ~200), so no correction is applied.
+_MIN_CALIBRATION_SAMPLES = 500
+
+
+def _calibration_ratio(y_val: np.ndarray, preds: np.ndarray) -> float:
+    """
+    Mean-bias correction measured on the held-out window: multiply raw
+    predictions by this so they average out to the actual outcomes. Replaces
+    the hardcoded per-prop percentages the predictor used to apply, which
+    were set against an older model and had drifted badly (e.g. +20% on
+    rushing_yards on top of a model already ~4% high).
+    """
+    total_pred = float(np.sum(preds))
+    if total_pred <= 0 or len(preds) < _MIN_CALIBRATION_SAMPLES:
+        return 1.0
+    return float(np.clip(np.sum(y_val) / total_pred, 0.7, 1.3))
+
+
 # ===========================================================================
 # Continuous & Count Regressor Training
 # ===========================================================================
@@ -287,6 +306,8 @@ def train_prop_regressor(
     residuals = y_val - preds
     residual_std = float(np.std(residuals))
 
+    calibration_ratio = _calibration_ratio(y_val, preds)
+
     # Baseline comparison (season/career average vs ML model)
     baseline_col = f"{target_col}_weighted_baseline" if f"{target_col}_weighted_baseline" in val_df.columns else f"{target_col}_3wk"
     baseline_preds = val_df[baseline_col].fillna(y_train.mean()).to_numpy(dtype=np.float32) if baseline_col in val_df.columns else np.full_like(y_val, y_train.mean())
@@ -309,6 +330,7 @@ def train_prop_regressor(
         "baseline_mae": round(base_mae, 2),
         "baseline_rmse": round(base_rmse, 2),
         "residual_std": round(residual_std, 2),
+        "calibration_ratio": round(calibration_ratio, 4),
         "trained_at": datetime.utcnow().isoformat(),
         "n_samples": len(clean_df),
     }
