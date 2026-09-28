@@ -126,6 +126,12 @@
           <option value="WR">WR</option>
           <option value="TE">TE</option>
         </select>
+        <select id="rating-filter" onchange="filterTable()" class="bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-sm text-slate-300 focus:outline-none focus:border-emerald-500 font-mono">
+          <option value="ALL">All Ratings</option>
+          <option value="optimal">Optimal</option>
+          <option value="lean">Lean</option>
+          <option value="not_optimal">Not Optimal</option>
+        </select>
         <select id="prop-type-filter" onchange="filterTable()" class="bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-sm text-slate-300 focus:outline-none focus:border-emerald-500 font-mono">
           <option value="ALL">All Prop Types</option>
           <option value="passing_yards">Passing Yards</option>
@@ -157,13 +163,14 @@
               <th scope="col" class="py-3.5 px-4 text-right">Sportsbook Line</th>
               <th scope="col" class="py-3.5 px-4 text-right">Difference</th>
               <th scope="col" class="py-3.5 px-4 text-center">Over / Under %</th>
+              <th scope="col" class="py-3.5 px-3 text-center">Play Rating</th>
               <th scope="col" class="py-3.5 px-3 text-center">Confidence</th>
               <th scope="col" class="py-3.5 px-3 text-center">Sample & Factors</th>
             </tr>
           </thead>
           <tbody id="props-table-body" class="divide-y divide-slate-800/60 font-mono text-xs">
             <tr>
-              <td colspan="10" class="text-center py-16 text-slate-500 font-sans">
+              <td colspan="11" class="text-center py-16 text-slate-500 font-sans">
                 <div class="inline-block animate-spin mr-2">⚡</div> Loading player prop projections & matchup data...
               </td>
             </tr>
@@ -303,14 +310,14 @@
         filterTable();
       } catch (err) {
         console.error('Failed to load props:', err);
-        document.getElementById('props-table-body').innerHTML = '<tr><td colspan="10" class="text-center py-12 text-red-400 font-sans">Unable to connect to PROPCAST API. Ensure backend server is running.</td></tr>';
+        document.getElementById('props-table-body').innerHTML = '<tr><td colspan="11" class="text-center py-12 text-red-400 font-sans">Unable to connect to PROPCAST API. Ensure backend server is running.</td></tr>';
       }
     }
 
     function renderTable(props) {
       const tbody = document.getElementById('props-table-body');
       if (!props || props.length === 0) {
-        tbody.innerHTML = '<tr><td colspan="10" class="text-center py-12 text-slate-500 font-sans">No projections found matching your criteria.</td></tr>';
+        tbody.innerHTML = '<tr><td colspan="11" class="text-center py-12 text-slate-500 font-sans">No projections found matching your criteria.</td></tr>';
         return;
       }
 
@@ -350,8 +357,23 @@
         const confVal = p.model_confidence ? p.model_confidence + '%' : '—';
         const sampleSz = p.sample_size || 14;
 
-        const incFactorsList = (p.increasing_factors || []).map(f => '<li>• ' + f + '</li>').join('');
-        const decFactorsList = (p.decreasing_factors || []).map(f => '<li>• ' + f + '</li>').join('');
+        const esc = s => String(s == null ? '' : s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+        const ratingStyles = {
+          optimal: ['Optimal', 'bg-emerald-950/80 text-emerald-400 border-emerald-700/60'],
+          lean: ['Lean', 'bg-amber-950/80 text-amber-400 border-amber-700/60'],
+          not_optimal: ['Not Optimal', 'bg-red-950/80 text-red-400 border-red-800/60'],
+        };
+        const rs = ratingStyles[p.play_rating] || ['—', 'bg-slate-800 text-slate-400 border-slate-700'];
+        const sideTxt = p.play_side ? (p.play_side === 'yes' ? 'YES' : p.play_side.toUpperCase()) : '';
+        const ratingCell = '<div class="flex flex-col items-center" title="' + esc(p.play_summary) + '">' +
+          '<span class="inline-flex items-center px-2 py-0.5 rounded text-[10px] font-bold border ' + rs[1] + '">' + rs[0] + '</span>' +
+          (sideTxt ? '<span class="text-[10px] text-slate-400 font-mono mt-0.5">' + sideTxt + (p.play_score != null ? ' · ' + Math.round(p.play_score) : '') + '</span>' : '') +
+          '</div>';
+        const impactStyle = {supports: ['✅', 'text-emerald-300'], against: ['⚠️', 'text-amber-300'], risk: ['⛔', 'text-red-300'], info: ['ℹ️', 'text-slate-300']};
+        const factorsList = (p.play_factors || []).map(f => {
+          const st = impactStyle[f.impact] || impactStyle.info;
+          return '<li class="' + st[1] + '">' + st[0] + ' <b>' + esc(f.label) + ':</b> ' + esc(f.detail) + '</li>';
+        }).join('');
 
         return '<tr class="table-row-hover transition-colors">' +
           '<td class="py-3 px-4 font-sans font-medium text-white flex items-center space-x-3">' +
@@ -388,12 +410,13 @@
               '<span class="text-[10px] text-red-400 font-bold">' + underPct + '%</span>' +
             '</div>' +
           '</td>' +
+          '<td class="py-3 px-3 text-center">' + ratingCell + '</td>' +
           '<td class="py-3 px-3 text-center"><span class="inline-flex items-center px-2 py-0.5 rounded text-[10px] bg-emerald-950/80 text-emerald-400 font-mono border border-emerald-800/50">' + confVal + '</span></td>' +
           '<td class="py-3 px-3 text-center font-mono text-[10px]">' +
             '<details class="cursor-pointer"><summary class="text-cyan-400 hover:underline select-none">N=' + sampleSz + ' ℹ️</summary>' +
             '<div class="mt-1 text-left bg-slate-950 p-2.5 rounded-md border border-slate-800 space-y-1 font-sans text-[11px] whitespace-normal">' +
-              '<div class="text-emerald-400 font-bold">Increasing:</div><ul class="text-slate-300 space-y-0.5">' + (incFactorsList || '<li>• Standard usage</li>') + '</ul>' +
-              '<div class="text-red-400 font-bold mt-1">Decreasing:</div><ul class="text-slate-300 space-y-0.5">' + (decFactorsList || '<li>• Defense matchup</li>') + '</ul>' +
+              '<div class="text-slate-100 font-bold">' + esc(p.play_summary || 'Play factors') + '</div>' +
+              '<ul class="space-y-0.5 mt-1">' + (factorsList || '<li class="text-slate-400">No situational factors available.</li>') + '</ul>' +
             '</div></details>' +
           '</td>' +
         '</tr>';
@@ -404,6 +427,7 @@
       const q = document.getElementById('search-input').value.toLowerCase();
       const pType = document.getElementById('prop-type-filter').value;
       const pos = document.getElementById('position-filter').value;
+      const ratingSel = document.getElementById('rating-filter').value;
 
       let filtered = allProps.filter(p => {
         const name = (p.player && p.player.full_name) ? p.player.full_name.toLowerCase() : '';
@@ -414,7 +438,8 @@
         const matchesQuery = !q || name.includes(q) || team.includes(q) || teamFull.includes(q) || opp.includes(q) || oppFull.includes(q);
         const matchesProp = (pType === 'ALL' || p.prop_type === pType);
         const matchesPos = (pos === 'ALL' || (p.player && p.player.position === pos));
-        return matchesQuery && matchesProp && matchesPos;
+        const matchesRating = (ratingSel === 'ALL' || p.play_rating === ratingSel);
+        return matchesQuery && matchesProp && matchesPos && matchesRating;
       });
 
       renderTable(filtered);

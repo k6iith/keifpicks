@@ -184,6 +184,12 @@ class MarketLineSchema(BaseModel):
 # ---------------------------------------------------------------------------
 # Prop card (combines prediction + market line + context)
 # ---------------------------------------------------------------------------
+class PlayFactorSchema(BaseModel):
+    label: str
+    detail: str
+    impact: str = Field(..., description="supports | against | risk | info")
+
+
 class PropCard(BaseModel):
     """
     Composite view shown on prop pages.
@@ -225,6 +231,14 @@ class PropCard(BaseModel):
     game_script_adjustment: Optional[float] = Field(None, description="Spread/game total script impact factor")
     increasing_factors: List[str] = Field(default_factory=list, description="Key factors driving projection up")
     decreasing_factors: List[str] = Field(default_factory=list, description="Key factors driving projection down")
+    play_side: Optional[str] = Field(None, description="Side the model prefers: over, under, or yes (anytime TD)")
+    play_rating: Optional[str] = Field(None, description="optimal | lean | not_optimal")
+    play_score: Optional[float] = Field(None, description="0-100 play quality score")
+    play_summary: Optional[str] = Field(None, description="One-line explanation of the rating")
+    play_factors: List[PlayFactorSchema] = Field(
+        default_factory=list,
+        description="Usage, injury, defense, recent-form, game-script and market factors behind the rating",
+    )
     data_quality_score: Optional[float] = Field(
         None, description="0-1 score reflecting data freshness and completeness"
     )
@@ -295,6 +309,8 @@ class ParlayLeg(BaseModel):
     american_odds: int = Field(..., description="Fair American odds implied by the model probability")
     model_edge: Optional[float] = Field(None, description="Model probability minus market-implied probability")
     game_week: Optional[int] = None
+    play_rating: Optional[str] = None
+    play_summary: Optional[str] = None
 
 
 class PlayOfTheWeek(BaseModel):
