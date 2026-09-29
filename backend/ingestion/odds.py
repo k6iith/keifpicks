@@ -62,6 +62,47 @@ def _safe_headers() -> dict:
     return {"Accept": "application/json"}
 
 
+_credit_status_cache: dict = {}
+
+
+def get_credit_status(max_age_seconds: int = 600) -> dict:
+    """
+    Remaining / used Odds API credits for the configured key.
+
+    Calls /v4/sports, which The Odds API does not charge credits for, and
+    reads the x-requests-* headers every response carries. Cached for 10
+    minutes so the status page can't be used to hammer the API.
+    """
+    import time
+
+    if not _has_api_key():
+        return {"configured": False}
+    cached = _credit_status_cache.get("value")
+    if cached and time.time() - _credit_status_cache.get("at", 0) < max_age_seconds:
+        return cached
+    try:
+        with httpx.Client(timeout=_HTTP_TIMEOUT) as client:
+            resp = client.get(f"{ODDS_API_BASE}/sports", params={"apiKey": settings.odds_api_key},
+                              headers=_safe_headers())
+        _record_credits(resp)
+        if resp.status_code == 401:
+            value = {"configured": True, "valid_key": False}
+        else:
+            to_int = lambda v: int(float(v)) if v is not None else None
+            value = {
+                "configured": True,
+                "valid_key": True,
+                "credits_remaining": to_int(resp.headers.get("x-requests-remaining")),
+                "credits_used": to_int(resp.headers.get("x-requests-used")),
+                "credits_per_weekly_pull": 16 * len(DEFAULT_MARKETS),
+            }
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Could not check Odds API credits: %s", exc)
+        return {"configured": True, "error": "Odds API unreachable"}
+    _credit_status_cache.update(value=value, at=time.time())
+    return value
+
+
 def fetch_nfl_events() -> list[dict]:
     """Fetch current NFL events from The Odds API."""
     if not _has_api_key():
