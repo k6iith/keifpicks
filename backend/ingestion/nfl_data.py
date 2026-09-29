@@ -115,12 +115,45 @@ def _current_season() -> int:
     return today.year if today.month >= 3 else today.year - 1
 
 
-def _current_nfl_week(season: int) -> int:
+def _current_nfl_week(season: int, db: Optional[Session] = None) -> int:
     """
-    Estimate the current NFL week based on the calendar.
-    Week 1 starts the first Thursday of September.
-    Returns 1 if before the season starts, 18 if after the regular season.
+    The NFL week to build predictions for: the week of the next game that
+    hasn't finished yet, read from the games table.
+
+    This used to be purely calendar-based (week 1 = first Thursday of
+    September, rolling over every Thursday). The 2026 opener was a week after
+    that date, so from Thursday through Monday it returned the NEXT week: on
+    Sunday of week 3 it said week 4, and Friday's refresh would have rebuilt
+    week 5 instead of week 4. Reading the schedule keeps it right however the
+    season is laid out: during a game day it's that week, and once Monday
+    night ends it moves to the next week. Falls back to the calendar estimate
+    if the schedule isn't loaded.
     """
+    own_session = db is None
+    try:
+        if own_session:
+            db = SessionLocal()
+        from zoneinfo import ZoneInfo
+        from backend.config import settings
+
+        # Kickoffs are stored as naive US Eastern local times. A game counts
+        # as "not finished" until ~4.5h after kickoff.
+        now_local = datetime.now(ZoneInfo(settings.scheduler_timezone)).replace(tzinfo=None)
+        cutoff = now_local - pd.Timedelta(hours=4, minutes=30)
+        row = (
+            db.query(Game.week)
+            .filter(Game.season == season, Game.kickoff_time.isnot(None), Game.kickoff_time > cutoff)
+            .order_by(Game.kickoff_time.asc())
+            .first()
+        )
+        if row is not None:
+            return int(row[0])
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Falling back to calendar week estimate: %s", exc)
+    finally:
+        if own_session and db is not None:
+            db.close()
+
     today = date.today()
     # Approximate season start: first Thursday of September
     sept_1 = date(season, 9, 1)

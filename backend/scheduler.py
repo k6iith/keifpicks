@@ -4,6 +4,8 @@ Configures recurring APScheduler cron jobs for automated data updates.
 - Hourly: injuries, weather, odds
 - Tuesday 6am: weekly schedule and roster refresh
 - Wednesday 5am: model retraining against the newly-completed week
+- Wednesday 12:00pm (US Eastern by default): new-week refresh — schedule,
+  box scores, injuries, odds, depth charts and predictions for the new week
 - Friday 8am: mid-week injuries/odds refresh + prediction regeneration
 - Monday 3am: final game stats and model performance recalculation
 """
@@ -12,6 +14,7 @@ from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
 
+from backend.config import settings
 from backend.db.database import SessionLocal
 from backend.ingestion.injuries import ingest_injuries
 from backend.ingestion.weather import ingest_weather_for_upcoming_games
@@ -113,6 +116,51 @@ def run_weekly_refresh():
         logger.error("Error during weekly depth-chart/prediction refresh: %s", exc)
 
 
+def run_wednesday_refresh():
+    """
+    Wednesday noon refresh: roll the site over to the new week.
+
+    By Wednesday midday Monday night's game is final, the week's first
+    official injury report is out, and lines for the new week are posted.
+    This pulls all of that and rebuilds predictions for the new week:
+      1. schedule (game statuses, spreads/totals for the new week)
+      2. box scores (Tuesday's 6am UTC run can land before Monday-night
+         stats are published)
+      3. injury reports and sportsbook lines
+      4. depth charts + prediction regeneration for the current week
+    """
+    logger.info("⏰ Starting Wednesday new-week refresh...")
+    from backend.ingestion.nfl_data import _current_season
+
+    season = _current_season()
+    steps = [
+        ("schedule", lambda db: ingest_schedule(db, [season])),
+        ("player stats", lambda db: ingest_player_stats(db, [season])),
+        ("injuries", ingest_injuries),
+        ("odds", ingest_market_lines),
+    ]
+    db = SessionLocal()
+    try:
+        # Each step on its own, so e.g. an injury-feed outage doesn't also
+        # skip pulling the new week's lines.
+        for name, step in steps:
+            try:
+                result = step(db)
+                logger.info("Wednesday %s refresh: %s", name, result)
+            except Exception as exc:
+                db.rollback()
+                logger.error("Error during Wednesday %s refresh: %s", name, exc)
+    finally:
+        db.close()
+
+    # Separate step with its own session, same as the other refreshes, so an
+    # ingestion failure above doesn't block rebuilding the week's predictions.
+    try:
+        sync_espn_rosters_and_depth_charts()
+    except Exception as exc:
+        logger.error("Error during Wednesday depth-chart/prediction refresh: %s", exc)
+
+
 def run_midweek_refresh():
     """
     Friday morning refresh: re-sync injuries/odds and regenerate predictions
@@ -210,6 +258,18 @@ def start_scheduler():
             replace_existing=True,
         )
 
+        # Wednesday 12:00 PM new-week refresh (injuries, lines, new week's
+        # predictions). Pinned to settings.scheduler_timezone (US Eastern by
+        # default) rather than the server clock, which is UTC on Render.
+        scheduler.add_job(
+            run_wednesday_refresh,
+            CronTrigger(day_of_week="wed", hour=12, minute=0, timezone=settings.scheduler_timezone),
+            id="wednesday_refresh",
+            replace_existing=True,
+            misfire_grace_time=3 * 60 * 60,
+            coalesce=True,
+        )
+
         # Friday 8:00 AM mid-week refresh (injuries/odds firm up by Friday;
         # this regenerates predictions against the freshest picture without
         # waiting for next Tuesday)
@@ -229,7 +289,7 @@ def start_scheduler():
         )
 
         scheduler.start()
-        logger.info("✅ APScheduler started with 5 background pipelines.")
+        logger.info("✅ APScheduler started with 6 background pipelines.")
 
 
 def shutdown_scheduler():

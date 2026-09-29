@@ -13,13 +13,33 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # Engine
 # ---------------------------------------------------------------------------
+# Hosted Postgres providers hand out "postgres://..." or "postgresql://..."
+# URLs. SQLAlchemy rejects the first, and the default driver for the second
+# differs between SQLAlchemy versions, so pin the installed psycopg (v3) driver.
+_database_url = settings.database_url
+for _prefix in ("postgres://", "postgresql://"):
+    if _database_url.startswith(_prefix):
+        _database_url = "postgresql+psycopg://" + _database_url[len(_prefix):]
+        break
+
+# PostgreSQL returns SUM()/COALESCE() over integer columns as NUMERIC, which
+# psycopg hands back as decimal.Decimal; the feature code does pandas/numpy
+# math on those results and breaks on Decimal (SQLite returned floats). Load
+# NUMERIC as float everywhere instead: nothing in this app needs exact
+# decimal arithmetic.
+if _database_url.startswith("postgresql+psycopg://"):
+    import psycopg
+    from psycopg.types.numeric import FloatLoader
+
+    psycopg.adapters.register_loader("numeric", FloatLoader)
+
 _connect_args: dict = {}
-if "sqlite" in settings.database_url:
+if "sqlite" in _database_url:
     # SQLite: disable the same-thread check so FastAPI workers can share
     _connect_args["check_same_thread"] = False
 
 engine = create_engine(
-    settings.database_url,
+    _database_url,
     connect_args=_connect_args,
     # Echo SQL in development; silence in production
     echo=(settings.environment == "development"),
@@ -28,7 +48,7 @@ engine = create_engine(
 )
 
 # Enable WAL mode for SQLite to improve concurrent read performance
-if "sqlite" in settings.database_url:
+if "sqlite" in _database_url:
     @event.listens_for(engine, "connect")
     def _set_sqlite_pragma(dbapi_conn, _connection_record):
         cursor = dbapi_conn.cursor()
