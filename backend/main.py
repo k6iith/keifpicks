@@ -36,6 +36,9 @@ async def lifespan(app: FastAPI):
     try:
         init_db()
         logger.info("✅ Database initialised successfully.")
+        # First start against a new hosted database: copy propcast.db into it.
+        from backend.db.seed import seed_in_background
+        seed_in_background()
     except Exception as exc:
         logger.error("❌ Database initialisation failed: %s", exc)
 
