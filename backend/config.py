@@ -21,6 +21,9 @@ class Settings(BaseSettings):
     # --- Runtime ---
     environment: str = "development"
     log_level: str = "INFO"
+    # Time zone for the scheduled refresh jobs' clock times. Kickoff times in
+    # the games table are stored as US Eastern local time, so default to that.
+    scheduler_timezone: str = "America/New_York"
 
     # --- Model Season & Recency Weights (Configurable & Dynamic) ---
     season_weights_w1_3_hist: float = 0.60
