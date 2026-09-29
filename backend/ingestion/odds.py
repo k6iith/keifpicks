@@ -32,7 +32,26 @@ _MARKET_TO_PROP_TYPE: dict[str, str] = {
     "player_rush_attempts": "rushing_attempts",
 }
 
-DEFAULT_MARKETS = list(_MARKET_TO_PROP_TYPE.keys())
+# The Odds API charges 1 credit per market per event. On the 500-credit/month
+# free plan, one weekly pull of all 7 markets for a 16-game week costs 112
+# credits, which is over budget in months with five Wednesdays (560).
+# Dropping rushing attempts (the least-bet market) makes it 96 a week, 480 at
+# most per month. Its lines are still parsed if requested explicitly.
+DEFAULT_MARKETS = [m for m in _MARKET_TO_PROP_TYPE if m != "player_rush_attempts"]
+
+# Credits left on the account, from the x-requests-remaining header of the
+# most recent Odds API response (None until a response has been seen).
+_credits_remaining: Optional[int] = None
+
+
+def _record_credits(resp: httpx.Response) -> None:
+    global _credits_remaining
+    value = resp.headers.get("x-requests-remaining")
+    if value is not None:
+        try:
+            _credits_remaining = int(float(value))
+        except ValueError:
+            pass
 
 
 def _has_api_key() -> bool:
@@ -57,6 +76,7 @@ def fetch_nfl_events() -> list[dict]:
     try:
         with httpx.Client(timeout=_HTTP_TIMEOUT) as client:
             resp = client.get(url, params=params, headers=_safe_headers())
+            _record_credits(resp)
             resp.raise_for_status()
             return resp.json()
     except Exception as exc:
@@ -81,6 +101,7 @@ def fetch_nfl_props(event_id: str, markets: Optional[list[str]] = None) -> list[
     try:
         with httpx.Client(timeout=_HTTP_TIMEOUT) as client:
             resp = client.get(url, params=params, headers=_safe_headers())
+            _record_credits(resp)
             resp.raise_for_status()
             data = resp.json()
     except Exception as exc:
@@ -212,6 +233,9 @@ def _find_player(db: Session, player_name: str, game: Optional[Game] = None) -> 
 def ingest_market_lines(db: Session, max_events: int = 16) -> int:
     """
     Fetch and upsert real sportsbook MarketLine records from The Odds API.
+
+    Costs len(DEFAULT_MARKETS) credits per game (the events list is free), so
+    this runs only in the Wednesday refresh; see scheduler.py.
     """
     if not _has_api_key():
         logger.info("Odds API key not configured, skipping market line ingestion.")
@@ -224,9 +248,20 @@ def ingest_market_lines(db: Session, max_events: int = 16) -> int:
 
     count = 0
     events_processed = 0
+    cost_per_event = len(DEFAULT_MARKETS)
 
     for ev in events:
         if events_processed >= max_events:
+            break
+        # Budget guard: never start an event the remaining credits can't pay
+        # for, so an exhausted month degrades to "fewer games have real
+        # lines" instead of a string of failed requests.
+        if _credits_remaining is not None and _credits_remaining < cost_per_event:
+            logger.warning(
+                "Odds API credits nearly exhausted (%d left, %d needed per game): "
+                "stopping after %d games.",
+                _credits_remaining, cost_per_event, events_processed,
+            )
             break
 
         event_id = ev.get("id")

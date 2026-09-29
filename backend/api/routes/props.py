@@ -11,7 +11,7 @@ import math
 from datetime import datetime, timezone
 from typing import Dict, List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, Header, HTTPException, Query
 from sqlalchemy import select
 from sqlalchemy.orm import Session, joinedload
 
@@ -556,9 +556,25 @@ def get_touchdown_props(limit: int = Query(100), db: Session = Depends(get_db)):
 
 
 @router.post("/props/refresh-odds")
-def refresh_odds(max_events: int = Query(16), db: Session = Depends(get_db)):
-    """Trigger live sync of sportsbook lines from The Odds API."""
+def refresh_odds(
+    max_events: int = Query(16, ge=1, le=16),
+    x_admin_key: Optional[str] = Header(None),
+    db: Session = Depends(get_db),
+):
+    """
+    Trigger a live sync of sportsbook lines from The Odds API.
+
+    Each call spends ~6 Odds API credits per game (~96 for a full week), so it
+    requires the X-Admin-Key header to match the ADMIN_KEY setting; with no
+    ADMIN_KEY configured it is disabled. It used to be open to anyone, and one
+    request could drain the month's credit budget.
+    """
+    import secrets
+    from backend.config import settings
     from backend.ingestion.odds import ingest_market_lines
+
+    if not settings.admin_key or not x_admin_key or not secrets.compare_digest(x_admin_key, settings.admin_key):
+        raise HTTPException(status_code=403, detail="Admin key required.")
     count = ingest_market_lines(db, max_events=max_events)
     return {"status": "success", "lines_upserted": count}
 
