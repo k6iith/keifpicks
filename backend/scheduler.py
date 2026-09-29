@@ -1,12 +1,12 @@
 """
 PROPCAST – Background Task Scheduler
 Configures recurring APScheduler cron jobs for automated data updates.
-- Hourly: injuries, weather, odds
+- Hourly: injuries, weather (NOT odds: see run_hourly_updates)
 - Tuesday 6am: weekly schedule and roster refresh
 - Wednesday 5am: model retraining against the newly-completed week
 - Wednesday 12:00pm (US Eastern by default): new-week refresh — schedule,
   box scores, injuries, odds, depth charts and predictions for the new week
-- Friday 8am: mid-week injuries/odds refresh + prediction regeneration
+- Friday 8am: mid-week injuries refresh + prediction regeneration
 - Monday 3am: final game stats and model performance recalculation
 """
 import logging
@@ -62,8 +62,15 @@ def sync_hourly_rosters(db: SessionLocal):
 
 
 def run_hourly_updates():
-    """Execute hourly jobs: injuries, weather, odds, and roster/status synchronization."""
-    logger.info("⏰ Starting scheduled hourly update (rosters, injuries, weather, odds)...")
+    """
+    Execute hourly jobs: injuries, weather, and roster/status synchronization.
+
+    Sportsbook odds are deliberately NOT pulled here. Each odds pull costs
+    ~96 Odds API credits (6 markets x 16 games); hourly that's ~2,300 a day
+    against a 500-credit monthly plan. Odds are pulled once a week in the
+    Wednesday refresh instead.
+    """
+    logger.info("⏰ Starting scheduled hourly update (rosters, injuries, weather)...")
     db = SessionLocal()
     try:
         sync_hourly_rosters(db)
@@ -74,8 +81,6 @@ def run_hourly_updates():
         weather_count = ingest_weather_for_upcoming_games(db)
         logger.info("Hourly weather update: %d records", weather_count)
 
-        odds_count = ingest_market_lines(db)
-        logger.info("Hourly odds update: %d records", odds_count)
     except Exception as exc:
         logger.error("Error during scheduled hourly update: %s", exc)
     finally:
@@ -163,7 +168,7 @@ def run_wednesday_refresh():
 
 def run_midweek_refresh():
     """
-    Friday morning refresh: re-sync injuries/odds and regenerate predictions
+    Friday morning refresh: re-sync injuries and regenerate predictions
     from whatever's changed since Tuesday, without re-pulling the full
     schedule/player-stats tables (that's what Tuesday's run_weekly_refresh
     is for).
@@ -173,17 +178,15 @@ def run_midweek_refresh():
     week of practice reports, questionable/out designations firming up, and
     lines moving — Tuesday's predictions can be noticeably stale. This
     doesn't touch box-score stats (there's nothing new there mid-week); it
-    just pulls the latest injury/odds picture and rebuilds this week's
-    predictions against it.
+    just pulls the latest injury picture and rebuilds this week's
+    predictions against it. (Odds are not re-pulled here: the weekly Odds API
+    budget only covers the Wednesday pull. Lines stored Wednesday are reused.)
     """
     logger.info("⏰ Starting scheduled mid-week refresh...")
     db = SessionLocal()
     try:
         injuries_count = ingest_injuries(db)
         logger.info("Mid-week injuries update: %d records", injuries_count)
-
-        odds_count = ingest_market_lines(db)
-        logger.info("Mid-week odds update: %d records", odds_count)
     except Exception as exc:
         logger.error("Error during mid-week refresh: %s", exc)
     finally:
