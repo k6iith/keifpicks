@@ -51,6 +51,13 @@ def _data_quality_score(prediction_created_at: Optional[datetime]) -> float:
         return 0.8
 
 
+# Prop types kept out of every prop card, play of the week and safer pick.
+# Anytime TD odds aren't pulled from the Odds API (the 500-credit plan only
+# covers 6 markets a week), so TD cards could only show placeholder odds.
+# TD predictions are still generated and scored for the model metrics page.
+HIDDEN_PROP_TYPES = {"anytime_td"}
+
+
 def _build_prop_cards(
     db: Session,
     game_ids: List[int],
@@ -69,6 +76,7 @@ def _build_prop_cards(
         .where(
             Prediction.game_id.in_(game_ids),
             Prediction.is_current.is_(True),
+            Prediction.prop_type.notin_(HIDDEN_PROP_TYPES),
             Player.status == "ACT",
             or_(
                 Player.team_id == Game.home_team_id,
@@ -543,14 +551,6 @@ def get_rushing_props(limit: int = Query(100), db: Session = Depends(get_db)):
 def get_receiving_props(limit: int = Query(100), db: Session = Depends(get_db)):
     gids = _get_today_game_ids(db)
     cards = _build_prop_cards(db, gids, ["receiving_yards", "receptions"])
-    cards.sort(key=lambda c: (c.projection or 0.0), reverse=True)
-    return PropList(props=cards[:limit], count=len(cards), disclaimer=DISCLAIMER)
-
-
-@router.get("/props/touchdowns", response_model=PropList)
-def get_touchdown_props(limit: int = Query(100), db: Session = Depends(get_db)):
-    gids = _get_today_game_ids(db)
-    cards = _build_prop_cards(db, gids, ["anytime_td"])
     cards.sort(key=lambda c: (c.projection or 0.0), reverse=True)
     return PropList(props=cards[:limit], count=len(cards), disclaimer=DISCLAIMER)
 
