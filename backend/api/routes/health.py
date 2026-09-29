@@ -9,7 +9,10 @@ from fastapi import APIRouter
 router = APIRouter(tags=["Health"])
 
 
-@router.get("/health", summary="Liveness check")
+# Also answers HEAD: uptime monitors such as UptimeRobot (used to keep the
+# free Render instance awake) send HEAD by default, and a GET-only route
+# answers those with 405, which the monitor reports as "down".
+@router.api_route("/health", methods=["GET", "HEAD"], summary="Liveness check")
 def health_check() -> dict:
     """Returns service status and current UTC timestamp."""
     return {

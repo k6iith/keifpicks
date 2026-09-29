@@ -153,7 +153,7 @@ STATIC_DIR = Path(__file__).resolve().parent / "static"
 if STATIC_DIR.exists():
     app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
-@app.get("/", tags=["Dashboard"])
+@app.api_route("/", methods=["GET", "HEAD"], tags=["Dashboard"])
 def serve_dashboard():
     """Serve the PROPCAST NFL Player Prop Analytics Web Dashboard."""
     index_file = STATIC_DIR / "index.html"
