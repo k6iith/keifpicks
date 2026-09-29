@@ -35,9 +35,9 @@ _MARKET_TO_PROP_TYPE: dict[str, str] = {
 # The Odds API charges 1 credit per market per event. On the 500-credit/month
 # free plan, one weekly pull of all 7 markets for a 16-game week costs 112
 # credits, which is over budget in months with five Wednesdays (560).
-# Dropping rushing attempts (the least-bet market) makes it 96 a week, 480 at
-# most per month. Its lines are still parsed if requested explicitly.
-DEFAULT_MARKETS = [m for m in _MARKET_TO_PROP_TYPE if m != "player_rush_attempts"]
+# Dropping anytime TD makes it 96 a week, 480 at most per month. Its odds are
+# still parsed if requested explicitly.
+DEFAULT_MARKETS = [m for m in _MARKET_TO_PROP_TYPE if m != "player_anytime_td"]
 
 # Credits left on the account, from the x-requests-remaining header of the
 # most recent Odds API response (None until a response has been seen).
