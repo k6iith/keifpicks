@@ -364,9 +364,15 @@ def _build_play_of_week(
     max_legs: int = 5,
 ) -> Optional[PlayOfTheWeek]:
     """
-    Picks the model's best-edge legs across every prop type and combines them
-    into a parlay whose combined American odds land roughly between +300 and
-    +500 (decimal 4.0-6.0), favoring the fewest legs that get there.
+    Combines the week's OPTIMAL plays (see backend/models/play_rating.py) into
+    a parlay whose combined odds land roughly between +300 and +500 (decimal
+    4.0-6.0), favoring the fewest legs that get there and, among those, the
+    highest combined play score.
+
+    Only legs rated "optimal" are eligible, each on the side the rating
+    picked. It used to take any leg not rated "not optimal", ranked by raw
+    model edge, so leans (thin edge, or a situation pointing the other way)
+    regularly made it in.
     """
     import itertools
 
@@ -376,41 +382,29 @@ def _build_play_of_week(
 
     candidates = []
     for c in cards:
-        if c.prop_type == "anytime_td":
-            if c.over_probability is None:
-                continue
-            side, prob = "yes", c.over_probability
-            edge = c.model_edge if c.model_edge is not None else 0.0
+        if c.play_rating != "optimal" or not c.play_side or c.over_probability is None:
+            continue
+        if c.play_side == "under":
+            side, prob = "under", c.under_probability
+            market = _market_implied_prob(c.under_odds) if c.under_odds is not None else 0.5
         else:
-            if c.model_edge is None or c.over_probability is None or c.under_probability is None:
-                continue
-            if c.model_edge >= 0:
-                side, prob = "over", c.over_probability
-                edge = c.model_edge
-            else:
-                side, prob = "under", c.under_probability
-                market_under = _market_implied_prob(c.under_odds) if c.under_odds is not None else 0.5
-                edge = prob - market_under
-
-        # Skip near-locks / near-coinflips and anything without real model edge.
-        # Also skip legs whose probability is unrealistically lopsided (e.g. >90%) —
-        # those are almost always an artifact of this app's synthetic "Consensus"
-        # line generator inventing a line with no real sportsbook backing it,
-        # not a genuine mispriced bet.
-        if prob is None or prob < 0.15 or prob > 0.72 or edge is None or edge < 0.02:
+            side, prob = c.play_side, c.over_probability
+            market = _market_implied_prob(c.over_odds) if c.over_odds is not None else 0.5
+        if prob is None:
             continue
-        # Never build the parlay out of legs the play rating flags as not
-        # optimal (injury designation, volatile role far from the book, ...),
-        # or legs whose preferred side disagrees with the one picked here.
-        if c.play_rating == "not_optimal" or (c.play_side and c.play_side != side):
+        # Sanity cap: a >85% leg is almost always a stale or mismatched line,
+        # not a real mispricing.
+        if prob > 0.85:
             continue
-
-        candidates.append({"card": c, "side": side, "prob": prob, "edge": edge, "decimal": 1.0 / prob})
+        candidates.append({
+            "card": c, "side": side, "prob": prob, "edge": prob - market,
+            "score": c.play_score or 0.0, "decimal": 1.0 / prob,
+        })
 
     if not candidates:
         return None
 
-    candidates.sort(key=lambda x: x["edge"], reverse=True)
+    candidates.sort(key=lambda x: x["score"], reverse=True)
 
     # One leg per player, to keep the parlay diversified across the slate
     seen_players = set()
@@ -436,8 +430,8 @@ def _build_play_of_week(
             for leg in combo:
                 dec *= leg["decimal"]
             if target_low <= dec <= target_high:
-                total_edge = sum(l["edge"] for l in combo)
-                score = (0, -total_edge, size)
+                total_score = sum(l["score"] for l in combo)
+                score = (0, -total_score, size)
                 found_in_range = True
             else:
                 dist = min(abs(dec - target_low), abs(dec - target_high))
@@ -517,7 +511,7 @@ def get_props_today(
 
 @router.get("/props/play-of-the-week", response_model=PlayOfTheWeek)
 def get_play_of_the_week(db: Session = Depends(get_db)):
-    """Model's best-edge legs combined into a parlay targeting +300 to +500 odds."""
+    """The week's optimal plays combined into a parlay targeting +300 to +500 odds."""
     gids = _get_today_game_ids(db)
     if not gids:
         raise HTTPException(status_code=404, detail="No games found for the current week")
@@ -526,7 +520,7 @@ def get_play_of_the_week(db: Session = Depends(get_db)):
     if result is None:
         raise HTTPException(
             status_code=404,
-            detail="Could not build a play of the week in the target odds range from today's props",
+            detail="Not enough plays rated Optimal this week to build a play of the week.",
         )
     return result
 
@@ -553,6 +547,17 @@ def get_receiving_props(limit: int = Query(100), db: Session = Depends(get_db)):
     cards = _build_prop_cards(db, gids, ["receiving_yards", "receptions"])
     cards.sort(key=lambda c: (c.projection or 0.0), reverse=True)
     return PropList(props=cards[:limit], count=len(cards), disclaimer=DISCLAIMER)
+
+
+@router.get("/odds/credits")
+def odds_credits():
+    """
+    How many Odds API credits the configured key has left this month. Uses a
+    free Odds API call (no credits spent) and caches it for 10 minutes. The
+    key itself is never returned.
+    """
+    from backend.ingestion.odds import get_credit_status
+    return get_credit_status()
 
 
 @router.post("/props/refresh-odds")
