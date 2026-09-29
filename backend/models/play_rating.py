@@ -375,6 +375,15 @@ def rate_play(
         add("High wind", f"{_fmt(wind)} mph wind forecast.", _HIGH_WIND[family])
 
     # --- market sanity ------------------------------------------------------
+    if is_td and not has_real_line:
+        # Anytime TD odds aren't pulled (Odds API budget), so the odds shown are
+        # a -110 placeholder and the "edge" above is measured against nothing
+        # real. Never call that optimal or use it in play of the week.
+        risk(
+            "No sportsbook odds",
+            "Anytime TD odds aren't pulled from the books; the odds shown are a placeholder.",
+            major=True,
+        )
     if not is_td:
         if not has_real_line:
             risk("No sportsbook line", "Line shown is generated, not a real book's number.")

@@ -11,7 +11,7 @@ import math
 from datetime import datetime, timezone
 from typing import Dict, List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, Header, HTTPException, Query
 from sqlalchemy import select
 from sqlalchemy.orm import Session, joinedload
 
@@ -51,6 +51,13 @@ def _data_quality_score(prediction_created_at: Optional[datetime]) -> float:
         return 0.8
 
 
+# Prop types kept out of every prop card, play of the week and safer pick.
+# Anytime TD odds aren't pulled from the Odds API (the 500-credit plan only
+# covers 6 markets a week), so TD cards could only show placeholder odds.
+# TD predictions are still generated and scored for the model metrics page.
+HIDDEN_PROP_TYPES = {"anytime_td"}
+
+
 def _build_prop_cards(
     db: Session,
     game_ids: List[int],
@@ -69,6 +76,7 @@ def _build_prop_cards(
         .where(
             Prediction.game_id.in_(game_ids),
             Prediction.is_current.is_(True),
+            Prediction.prop_type.notin_(HIDDEN_PROP_TYPES),
             Player.status == "ACT",
             or_(
                 Player.team_id == Game.home_team_id,
@@ -547,18 +555,26 @@ def get_receiving_props(limit: int = Query(100), db: Session = Depends(get_db)):
     return PropList(props=cards[:limit], count=len(cards), disclaimer=DISCLAIMER)
 
 
-@router.get("/props/touchdowns", response_model=PropList)
-def get_touchdown_props(limit: int = Query(100), db: Session = Depends(get_db)):
-    gids = _get_today_game_ids(db)
-    cards = _build_prop_cards(db, gids, ["anytime_td"])
-    cards.sort(key=lambda c: (c.projection or 0.0), reverse=True)
-    return PropList(props=cards[:limit], count=len(cards), disclaimer=DISCLAIMER)
-
-
 @router.post("/props/refresh-odds")
-def refresh_odds(max_events: int = Query(16), db: Session = Depends(get_db)):
-    """Trigger live sync of sportsbook lines from The Odds API."""
+def refresh_odds(
+    max_events: int = Query(16, ge=1, le=16),
+    x_admin_key: Optional[str] = Header(None),
+    db: Session = Depends(get_db),
+):
+    """
+    Trigger a live sync of sportsbook lines from The Odds API.
+
+    Each call spends ~6 Odds API credits per game (~96 for a full week), so it
+    requires the X-Admin-Key header to match the ADMIN_KEY setting; with no
+    ADMIN_KEY configured it is disabled. It used to be open to anyone, and one
+    request could drain the month's credit budget.
+    """
+    import secrets
+    from backend.config import settings
     from backend.ingestion.odds import ingest_market_lines
+
+    if not settings.admin_key or not x_admin_key or not secrets.compare_digest(x_admin_key, settings.admin_key):
+        raise HTTPException(status_code=403, detail="Admin key required.")
     count = ingest_market_lines(db, max_events=max_events)
     return {"status": "success", "lines_upserted": count}
 
