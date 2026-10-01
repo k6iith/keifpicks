@@ -455,8 +455,20 @@ def load_model(model_type: str, version: str = "1.0") -> Tuple[Optional[Any], Op
     if not model_path.exists() or not meta_path.exists():
         return None, None
 
-    with open(model_path, "rb") as f:
-        model = pickle.load(f)
+    try:
+        with open(model_path, "rb") as f:
+            model = pickle.load(f)
+    except Exception as exc:
+        # Pickled scikit-learn models only load on the version that saved
+        # them. requirements.txt pins it; this names the mismatch if the pin
+        # and the committed model files ever drift apart again.
+        import sklearn
+
+        raise RuntimeError(
+            f"Could not load {model_path.name} with scikit-learn {sklearn.__version__} "
+            f"({type(exc).__name__}: {exc}). The model files must be loaded with the "
+            f"scikit-learn version that saved them (see requirements.txt)."
+        ) from exc
     with open(meta_path, "r") as f:
         meta = json.load(f)
 

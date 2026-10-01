@@ -172,6 +172,9 @@ def sync_espn_rosters_and_depth_charts():
                 logger.warning(f"No Week {week} features generated for active starters.")
         except Exception as e:
             logger.exception(f"Failed to generate ML predictions after ESPN sync: {e}")
+            # Re-raise so the calling job records the real cause (it used to be
+            # swallowed here, which hid every failed prediction rebuild).
+            raise
             
     finally:
         db.close()
