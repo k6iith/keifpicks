@@ -23,6 +23,7 @@ from __future__ import annotations
 import re
 from typing import Iterable, List, Optional
 
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from backend.db.models import Player, Prediction
@@ -147,11 +148,25 @@ def find_player_by_name(
     team_ids = list(team_ids) if team_ids else None
     wanted_positions = _expand_positions(positions) if positions else None
 
+    # Let the database narrow things down to rows containing the surname
+    # (the last word of the normalized name; suffixes like "III" are already
+    # stripped), then do the exact normalized comparison in Python on those
+    # few rows. This used to load and normalize the ENTIRE players table on
+    # every call, twice; the ESPN sync makes a few thousand calls, which took
+    # most of an hour on Render's free instance against a remote database.
+    surname = target.split(" ")[-1]
+    pattern = "%" + surname.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
+    rows = (
+        db.query(Player)
+        .filter(func.lower(Player.full_name).like(pattern, escape="\\"))
+        .all()
+    )
+    matches = [c for c in rows if normalize_player_name(c.full_name) == target]
+
     def _candidates(scope_teams: bool) -> List[Player]:
-        q = db.query(Player)
         if scope_teams and team_ids:
-            q = q.filter(Player.team_id.in_(team_ids))
-        return [c for c in q.all() if normalize_player_name(c.full_name) == target]
+            return [c for c in matches if c.team_id in team_ids]
+        return list(matches)
 
     def _at_position(cands: List[Player]) -> List[Player]:
         if not wanted_positions:
