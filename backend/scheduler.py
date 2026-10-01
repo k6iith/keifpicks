@@ -9,13 +9,19 @@ Configures recurring APScheduler cron jobs for automated data updates.
 - Friday 8am: mid-week injuries refresh + prediction regeneration
 - Monday 3am: final game stats and model performance recalculation
 """
+import functools
+import gc
 import logging
+import threading
+from datetime import datetime, timedelta
+
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
 
 from backend.config import settings
 from backend.db.database import SessionLocal
+from backend.db.models import Game, PipelineRun, PipelineStatus, Prediction
 from backend.ingestion.injuries import ingest_injuries
 from backend.ingestion.weather import ingest_weather_for_upcoming_games
 from backend.ingestion.odds import ingest_market_lines
@@ -27,6 +33,132 @@ from backend.models.retrain import retrain_all_models
 logger = logging.getLogger(__name__)
 
 scheduler = BackgroundScheduler()
+
+# The heavy jobs (feature building, prediction regeneration, retraining) each
+# peak around 350-400 MB. On a 512 MB free instance two of them overlapping
+# can run the process out of memory, which kills it mid-job with nothing in
+# the logs but a restart. Only one heavy job runs at a time.
+_heavy_job_lock = threading.Lock()
+
+# Task names whose successful run produces the current week's predictions.
+_WEEK_BUILDERS = ("weekly_refresh", "wednesday_refresh", "midweek_refresh", "catch_up_refresh", "manual_refresh")
+
+
+# ---------------------------------------------------------------------------
+# Run tracking (pipeline_runs table), so job outcomes survive restarts and
+# show on /admin. A run left as "running" after a restart was interrupted —
+# almost always the process being killed (out of memory or a redeploy).
+# ---------------------------------------------------------------------------
+
+def _start_run(task_name: str):
+    db = SessionLocal()
+    try:
+        run = PipelineRun(task_name=task_name, started_at=datetime.utcnow(), status=PipelineStatus.running)
+        db.add(run)
+        db.commit()
+        return run.id
+    except Exception as exc:  # noqa: BLE001
+        db.rollback()
+        logger.warning("Could not record start of %s: %s", task_name, exc)
+        return None
+    finally:
+        db.close()
+
+
+def _finish_run(run_id, errors: list) -> None:
+    if run_id is None:
+        return
+    db = SessionLocal()
+    try:
+        run = db.get(PipelineRun, run_id)
+        if run is not None:
+            run.completed_at = datetime.utcnow()
+            run.status = PipelineStatus.failure if errors else PipelineStatus.success
+            run.error_message = "; ".join(errors)[:2000] if errors else None
+            db.commit()
+    except Exception as exc:  # noqa: BLE001
+        db.rollback()
+        logger.warning("Could not record end of run %s: %s", run_id, exc)
+    finally:
+        db.close()
+
+
+def _tracked(task_name: str, heavy: bool = False, skip_if_busy: bool = False):
+    """
+    Record a job's start/end/errors in pipeline_runs. A job may return a list
+    of error strings for steps it handled itself. Heavy jobs take the heavy-job
+    lock; with skip_if_busy they skip instead of waiting for it.
+    """
+    def decorator(fn):
+        @functools.wraps(fn)
+        def wrapper(*args, **kwargs):
+            if heavy:
+                if not _heavy_job_lock.acquire(blocking=not skip_if_busy):
+                    logger.info("Skipping %s: another heavy job is running.", task_name)
+                    return None
+            run_id = _start_run(task_name)
+            errors: list = []
+            try:
+                result = fn(*args, **kwargs)
+                if isinstance(result, list):
+                    errors = result
+            except Exception as exc:  # noqa: BLE001
+                logger.exception("Job %s failed: %s", task_name, exc)
+                errors = [f"{type(exc).__name__}: {exc}"]
+            finally:
+                _finish_run(run_id, errors)
+                if heavy:
+                    _heavy_job_lock.release()
+                gc.collect()
+            return errors
+        return wrapper
+    return decorator
+
+
+def _mark_interrupted_runs() -> None:
+    """On startup, close out runs a previous process never finished."""
+    db = SessionLocal()
+    try:
+        stale = (
+            db.query(PipelineRun)
+            .filter(PipelineRun.status == PipelineStatus.running, PipelineRun.completed_at.is_(None))
+            .all()
+        )
+        for run in stale:
+            run.status = PipelineStatus.failure
+            run.completed_at = datetime.utcnow()
+            run.error_message = (
+                "Interrupted: the server restarted before this job finished "
+                "(usually out of memory, or a redeploy while it ran)."
+            )
+        if stale:
+            db.commit()
+            logger.warning("Marked %d interrupted job run(s) as failed.", len(stale))
+    except Exception as exc:  # noqa: BLE001
+        db.rollback()
+        logger.warning("Could not check for interrupted runs: %s", exc)
+    finally:
+        db.close()
+
+
+def current_week_prediction_count():
+    """(season, week, number of current predictions for that week's games)."""
+    from backend.ingestion.nfl_data import _current_nfl_week, _current_season
+
+    season = _current_season()
+    db = SessionLocal()
+    try:
+        week = _current_nfl_week(season, db)
+        n = (
+            db.query(Prediction.id)
+            .join(Game, Game.id == Prediction.game_id)
+            .filter(Game.season == season, Game.week == week, Prediction.is_current.is_(True))
+            .count()
+        )
+        has_games = db.query(Game.id).filter(Game.season == season, Game.week == week).first() is not None
+        return season, week, n, has_games
+    finally:
+        db.close()
 
 
 def sync_hourly_rosters(db: SessionLocal):
@@ -61,6 +193,7 @@ def sync_hourly_rosters(db: SessionLocal):
         logger.warning("Roster synchronization skipped: %s", exc)
 
 
+@_tracked("hourly_updates", heavy=True, skip_if_busy=True)
 def run_hourly_updates():
     """
     Execute hourly jobs: injuries, weather, and roster/status synchronization.
@@ -87,6 +220,7 @@ def run_hourly_updates():
         db.close()
 
 
+@_tracked("weekly_refresh", heavy=True)
 def run_weekly_refresh():
     """
     Execute weekly schedule, roster, and player-stats refresh.
@@ -121,22 +255,25 @@ def run_weekly_refresh():
         logger.error("Error during weekly depth-chart/prediction refresh: %s", exc)
 
 
-def run_wednesday_refresh():
+def _new_week_refresh(label: str) -> list:
     """
-    Wednesday noon refresh: roll the site over to the new week.
+    Roll the site over to the current week. Returns a list of errors.
 
     By Wednesday midday Monday night's game is final, the week's first
     official injury report is out, and lines for the new week are posted.
-    This pulls all of that and rebuilds predictions for the new week:
+    This pulls all of that and rebuilds predictions for the current week:
       1. schedule (game statuses, spreads/totals for the new week)
       2. box scores (Tuesday's 6am UTC run can land before Monday-night
          stats are published)
       3. injury reports and sportsbook lines
       4. depth charts + prediction regeneration for the current week
+    and then checks that the week actually has predictions, because the
+    ESPN/prediction step logs its own failures instead of raising them.
     """
-    logger.info("⏰ Starting Wednesday new-week refresh...")
+    logger.info("⏰ Starting %s new-week refresh...", label)
     from backend.ingestion.nfl_data import _current_season
 
+    errors: list = []
     season = _current_season()
     steps = [
         ("schedule", lambda db: ingest_schedule(db, [season])),
@@ -151,21 +288,94 @@ def run_wednesday_refresh():
         for name, step in steps:
             try:
                 result = step(db)
-                logger.info("Wednesday %s refresh: %s", name, result)
+                logger.info("%s %s refresh: %s", label, name, result)
             except Exception as exc:
                 db.rollback()
-                logger.error("Error during Wednesday %s refresh: %s", name, exc)
+                logger.error("Error during %s %s refresh: %s", label, name, exc)
+                errors.append(f"{name}: {type(exc).__name__}: {exc}")
     finally:
         db.close()
+    gc.collect()
 
     # Separate step with its own session, same as the other refreshes, so an
     # ingestion failure above doesn't block rebuilding the week's predictions.
     try:
         sync_espn_rosters_and_depth_charts()
     except Exception as exc:
-        logger.error("Error during Wednesday depth-chart/prediction refresh: %s", exc)
+        logger.error("Error during %s depth-chart/prediction refresh: %s", label, exc)
+        errors.append(f"depth charts/predictions: {type(exc).__name__}: {exc}")
+
+    try:
+        season, week, n, _ = current_week_prediction_count()
+        logger.info("%s refresh: week %d now has %d current predictions.", label, week, n)
+        if n == 0:
+            errors.append(f"No predictions were generated for week {week} (see the ESPN sync lines in the logs).")
+    except Exception as exc:  # noqa: BLE001
+        errors.append(f"verification: {exc}")
+    return errors
 
 
+@_tracked("wednesday_refresh", heavy=True)
+def run_wednesday_refresh():
+    """Wednesday noon refresh: roll the site over to the new week."""
+    return _new_week_refresh("Wednesday")
+
+
+@_tracked("manual_refresh", heavy=True, skip_if_busy=True)
+def run_manual_refresh():
+    """Same as the Wednesday refresh, started from /admin."""
+    return _new_week_refresh("Manual")
+
+
+def start_manual_refresh() -> bool:
+    """Start the new-week refresh in the background. False if a heavy job is already running."""
+    if _heavy_job_lock.locked():
+        return False
+    threading.Thread(target=run_manual_refresh, name="manual-refresh", daemon=True).start()
+    return True
+
+
+@_tracked("catch_up_refresh", heavy=True, skip_if_busy=True)
+def _run_catch_up_refresh():
+    return _new_week_refresh("Catch-up")
+
+
+def run_catch_up_if_stale():
+    """
+    Self-heal: if the current week has games but no predictions (the
+    scheduled refresh never ran or died partway, e.g. the process was
+    restarted or ran out of memory), run the new-week refresh now.
+
+    Won't fire if any week-building job started in the last 6 hours, so a
+    refresh that keeps crashing can't turn into a restart loop.
+    """
+    try:
+        season, week, n, has_games = current_week_prediction_count()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Catch-up check failed: %s", exc)
+        return
+    if not has_games or n > 0:
+        return
+    db = SessionLocal()
+    try:
+        recent = (
+            db.query(PipelineRun.id)
+            .filter(
+                PipelineRun.task_name.in_(_WEEK_BUILDERS),
+                PipelineRun.started_at >= datetime.utcnow() - timedelta(hours=6),
+            )
+            .first()
+        )
+    finally:
+        db.close()
+    if recent:
+        logger.info("Week %d has no predictions, but a refresh ran in the last 6h; not retrying yet.", week)
+        return
+    logger.warning("Week %d has no predictions yet: running catch-up refresh.", week)
+    _run_catch_up_refresh()
+
+
+@_tracked("midweek_refresh", heavy=True)
 def run_midweek_refresh():
     """
     Friday morning refresh: re-sync injuries and regenerate predictions
@@ -201,6 +411,7 @@ def run_midweek_refresh():
         logger.error("Error during mid-week depth-chart/prediction refresh: %s", exc)
 
 
+@_tracked("monday_scoring", heavy=True)
 def run_scoring_job():
     """Score completed games and recalculate model metrics."""
     logger.info("⏰ Starting post-game evaluation and scoring...")
@@ -214,6 +425,7 @@ def run_scoring_job():
         db.close()
 
 
+@_tracked("weekly_retraining", heavy=True)
 def run_retraining_job():
     """
     Retrain every prop model against all data on file, including whatever
@@ -237,6 +449,17 @@ def run_retraining_job():
 def start_scheduler():
     """Initialize and start background jobs."""
     if not scheduler.running:
+        _mark_interrupted_runs()
+
+        # Self-heal check: a few minutes after startup (lets a first-time
+        # database seed finish), then hourly.
+        scheduler.add_job(
+            run_catch_up_if_stale,
+            IntervalTrigger(hours=1, start_date=datetime.now() + timedelta(minutes=3)),
+            id="catch_up_check",
+            replace_existing=True,
+        )
+
         # Every hour
         scheduler.add_job(
             run_hourly_updates,
@@ -292,7 +515,7 @@ def start_scheduler():
         )
 
         scheduler.start()
-        logger.info("✅ APScheduler started with 6 background pipelines.")
+        logger.info("✅ APScheduler started with 7 background pipelines.")
 
 
 def shutdown_scheduler():

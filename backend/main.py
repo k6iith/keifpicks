@@ -125,6 +125,7 @@ async def server_error_handler(request: Request, exc):
 # Routers
 # ---------------------------------------------------------------------------
 from backend.api.routes import (  # noqa: E402 – imported after app creation
+    admin,
     games,
     health,
     injuries,
@@ -139,6 +140,7 @@ app.include_router(players.router, prefix="/api")
 app.include_router(props.router, prefix="/api")
 app.include_router(injuries.router, prefix="/api")
 app.include_router(model_performance.router, prefix="/api")
+app.include_router(admin.router, prefix="/api")
 
 
 # ---------------------------------------------------------------------------
@@ -152,6 +154,12 @@ STATIC_DIR = Path(__file__).resolve().parent / "static"
 
 if STATIC_DIR.exists():
     app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
+
+@app.get("/admin", include_in_schema=False)
+def serve_admin():
+    """Admin page: job status and a manual weekly refresh (needs ADMIN_KEY)."""
+    return FileResponse(STATIC_DIR / "admin.html")
+
 
 @app.api_route("/", methods=["GET", "HEAD"], tags=["Dashboard"])
 def serve_dashboard():

@@ -1,0 +1,108 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="robots" content="noindex">
+  <title>KeifPicks Admin</title>
+  <style>
+    :root { --bg:#0b0f17; --card:#111827; --line:#1f2937; --text:#e5e7eb; --muted:#9ca3af; --ok:#34d399; --bad:#f87171; --run:#fbbf24; --accent:#10b981; }
+    * { box-sizing: border-box; }
+    body { margin:0; background:var(--bg); color:var(--text); font:14px/1.5 system-ui, -apple-system, Segoe UI, sans-serif; }
+    main { max-width: 900px; margin: 0 auto; padding: 24px 16px; }
+    h1 { font-size: 20px; margin: 0 0 16px; }
+    .card { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:16px; margin-bottom:16px; }
+    label { color:var(--muted); font-size:12px; display:block; margin-bottom:6px; }
+    input { width:100%; max-width:360px; padding:8px 10px; border-radius:6px; border:1px solid var(--line); background:#0b1220; color:var(--text); }
+    button { margin-top:10px; margin-right:8px; padding:8px 14px; border-radius:6px; border:1px solid var(--line); background:#1f2937; color:var(--text); cursor:pointer; }
+    button.primary { background:var(--accent); border-color:var(--accent); color:#052e1f; font-weight:600; }
+    button:disabled { opacity:.5; cursor:default; }
+    .msg { margin-top:10px; color:var(--muted); min-height:1.5em; }
+    .stats { display:flex; gap:24px; flex-wrap:wrap; }
+    .stat b { display:block; font-size:22px; }
+    .stat span { color:var(--muted); font-size:12px; }
+    table { width:100%; border-collapse:collapse; font-size:13px; }
+    th, td { text-align:left; padding:6px 8px; border-bottom:1px solid var(--line); vertical-align:top; }
+    th { color:var(--muted); font-weight:500; }
+    .success { color:var(--ok); } .failure { color:var(--bad); } .running { color:var(--run); }
+    .err { color:var(--bad); font-size:12px; word-break:break-word; }
+    .wrap { overflow-x:auto; }
+  </style>
+</head>
+<body>
+<main>
+  <h1>KeifPicks Admin</h1>
+
+  <div class="card">
+    <label for="key">Admin key (the ADMIN_KEY you set on Render)</label>
+    <input id="key" type="password" autocomplete="current-password">
+    <div>
+      <button id="load">Load status</button>
+      <button id="refresh" class="primary">Run weekly refresh now</button>
+    </div>
+    <div class="msg" id="msg"></div>
+  </div>
+
+  <div class="card" id="summary" hidden>
+    <div class="stats">
+      <div class="stat"><b id="week">—</b><span>Current week</span></div>
+      <div class="stat"><b id="preds">—</b><span>Predictions this week</span></div>
+      <div class="stat"><b id="running">—</b><span>Refresh running</span></div>
+    </div>
+  </div>
+
+  <div class="card wrap" id="runs-card" hidden>
+    <table>
+      <thead><tr><th>Job</th><th>Status</th><th>Started (your time)</th><th>Finished</th></tr></thead>
+      <tbody id="runs"></tbody>
+    </table>
+  </div>
+</main>
+<script>
+  const $ = id => document.getElementById(id);
+  try { $('key').value = sessionStorage.getItem('kp_admin_key') || ''; } catch (e) {}
+  const esc = s => String(s == null ? '' : s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+  const when = iso => iso ? new Date(iso).toLocaleString() : '—';
+
+  async function call(method, path) {
+    const key = $('key').value.trim();
+    try { sessionStorage.setItem('kp_admin_key', key); } catch (e) {}
+    const res = await fetch(path, { method, headers: { 'X-Admin-Key': key } });
+    let body = {};
+    try { body = await res.json(); } catch (e) {}
+    if (!res.ok) throw new Error(body.detail || ('HTTP ' + res.status));
+    return body;
+  }
+
+  async function loadStatus() {
+    $('msg').textContent = 'Loading…';
+    try {
+      const s = await call('GET', '/api/admin/status');
+      $('summary').hidden = false; $('runs-card').hidden = false;
+      $('week').textContent = s.season + ' wk ' + s.current_week;
+      $('preds').textContent = s.predictions_this_week;
+      $('preds').className = s.predictions_this_week > 0 ? 'success' : 'failure';
+      $('running').textContent = s.refresh_running ? 'Yes' : 'No';
+      $('runs').innerHTML = s.runs.map(r =>
+        '<tr><td>' + esc(r.task) + '</td><td class="' + esc(r.status) + '">' + esc(r.status) + '</td>' +
+        '<td>' + esc(when(r.started_at)) + '</td><td>' + esc(when(r.completed_at)) +
+        (r.error ? '<div class="err">' + esc(r.error) + '</div>' : '') + '</td></tr>'
+      ).join('') || '<tr><td colspan="4">No job runs recorded yet.</td></tr>';
+      $('msg').textContent = s.refresh_running ? 'A refresh is running. Reload in a few minutes.' : '';
+    } catch (e) { $('msg').textContent = e.message; }
+  }
+
+  $('load').onclick = loadStatus;
+  $('refresh').onclick = async () => {
+    if (!confirm('Run the weekly refresh now? It uses about 96 Odds API credits.')) return;
+    $('refresh').disabled = true;
+    try {
+      const r = await call('POST', '/api/admin/refresh-week');
+      $('msg').textContent = r.detail;
+      setTimeout(loadStatus, 3000);
+    } catch (e) { $('msg').textContent = e.message; }
+    finally { $('refresh').disabled = false; }
+  };
+</script>
+</body>
+</html>
