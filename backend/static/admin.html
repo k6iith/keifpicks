@@ -79,7 +79,7 @@
     try {
       const s = await call('GET', '/api/admin/status');
       $('summary').hidden = false; $('runs-card').hidden = false;
-      $('week').textContent = s.season + ' wk ' + s.current_week;
+      $('week').textContent = s.current_week != null ? s.season + ' wk ' + s.current_week : '?';
       $('preds').textContent = s.predictions_this_week;
       $('preds').className = s.predictions_this_week > 0 ? 'success' : 'failure';
       $('running').textContent = s.refresh_running ? 'Yes' : 'No';
@@ -88,7 +88,8 @@
         '<td>' + esc(when(r.started_at)) + '</td><td>' + esc(when(r.completed_at)) +
         (r.error ? '<div class="err">' + esc(r.error) + '</div>' : '') + '</td></tr>'
       ).join('') || '<tr><td colspan="4">No job runs recorded yet.</td></tr>';
-      $('msg').textContent = s.refresh_running ? 'A refresh is running. Reload in a few minutes.' : '';
+      $('msg').textContent = s.error ? ('Problem: ' + s.error)
+        : (s.refresh_running ? 'A refresh is running. Reload in a few minutes.' : '');
     } catch (e) { $('msg').textContent = e.message; }
   }
 

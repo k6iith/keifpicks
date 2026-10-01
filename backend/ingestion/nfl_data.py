@@ -8,7 +8,7 @@ All exceptions are caught and logged — functions always return int (count or 0
 from __future__ import annotations
 
 import logging
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
 from typing import Optional
 
 import pandas as pd
@@ -139,7 +139,7 @@ def _current_nfl_week(season: int, db: Optional[Session] = None) -> int:
         # Kickoffs are stored as naive US Eastern local times. A game counts
         # as "not finished" until ~4.5h after kickoff.
         now_local = datetime.now(ZoneInfo(settings.scheduler_timezone)).replace(tzinfo=None)
-        cutoff = now_local - pd.Timedelta(hours=4, minutes=30)
+        cutoff = now_local - timedelta(hours=4, minutes=30)
         row = (
             db.query(Game.week)
             .filter(Game.season == season, Game.kickoff_time.isnot(None), Game.kickoff_time > cutoff)
@@ -159,8 +159,10 @@ def _current_nfl_week(season: int, db: Optional[Session] = None) -> int:
     sept_1 = date(season, 9, 1)
     # Find first Thursday (weekday 3)
     days_to_thursday = (3 - sept_1.weekday()) % 7
-    season_start = sept_1 + pd.Timedelta(days=days_to_thursday)
-    season_start = season_start.to_pydatetime().date()
+    # Plain datetime.timedelta: with pandas 3, date + pd.Timedelta returns a
+    # datetime.date, so the old .to_pydatetime() call crashed here, turning
+    # any failed schedule lookup above into an error instead of a fallback.
+    season_start = sept_1 + timedelta(days=days_to_thursday)
 
     if today < season_start:
         return 1

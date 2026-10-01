@@ -33,9 +33,22 @@ def require_admin(x_admin_key: Optional[str] = Header(None)) -> None:
 def admin_status(db: Session = Depends(get_db)):
     from backend.scheduler import _heavy_job_lock, current_week_prediction_count
 
-    season, week, n_predictions, has_games = current_week_prediction_count()
-    runs = db.query(PipelineRun).order_by(PipelineRun.started_at.desc()).limit(30).all()
+    # Report a failure here as data, not an HTTP 500, so the page can show
+    # what went wrong (e.g. the database being unreachable).
+    week_error = None
+    try:
+        season, week, n_predictions, has_games = current_week_prediction_count()
+    except Exception as exc:  # noqa: BLE001
+        season = week = n_predictions = has_games = None
+        week_error = f"{type(exc).__name__}: {exc}"[:500]
+    try:
+        runs = db.query(PipelineRun).order_by(PipelineRun.started_at.desc()).limit(30).all()
+    except Exception as exc:  # noqa: BLE001
+        db.rollback()
+        runs = []
+        week_error = (week_error + " | " if week_error else "") + f"Reading job runs failed: {type(exc).__name__}: {exc}"[:500]
     return {
+        "error": week_error,
         "season": season,
         "current_week": week,
         "week_has_games": has_games,
