@@ -6,7 +6,7 @@ Supports real lines from DraftKings, FanDuel, BetMGM, Caesars, etc.
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 import httpx
@@ -212,33 +212,59 @@ def fetch_nfl_props(event_id: str, markets: Optional[list[str]] = None) -> list[
     return records
 
 
-def _match_game(db: Session, home_team_name: str, away_team_name: str) -> Optional[Game]:
-    """Match an Odds API event to a DB Game row by team names."""
-    home_mascot = home_team_name.split()[-1]
-    away_mascot = away_team_name.split()[-1]
+def _event_kickoff_local(commence_time: Optional[str]) -> datetime:
+    """Odds API commence_time (UTC ISO) -> naive local kickoff like games.kickoff_time (US Eastern)."""
+    from zoneinfo import ZoneInfo
 
-    # Search in upcoming scheduled games for 2026 week 3 or current active games
+    tz = ZoneInfo(settings.scheduler_timezone)
+    if commence_time:
+        try:
+            dt = datetime.fromisoformat(commence_time.replace("Z", "+00:00"))
+            return dt.astimezone(tz).replace(tzinfo=None)
+        except ValueError:
+            pass
+    return datetime.now(tz).replace(tzinfo=None)
+
+
+def _team_matches(team: Optional[Team], name: str) -> bool:
+    """Full name, or the nickname ("Chiefs", "49ers") when the full names differ."""
+    if team is None or not name:
+        return False
+    full = (team.full_name or "").strip().lower()
+    n = name.strip().lower()
+    return full == n or (bool(full) and full.split()[-1] == n.split()[-1])
+
+
+def _match_game(
+    db: Session, home_team_name: str, away_team_name: str, commence_time: Optional[str] = None
+) -> Optional[Game]:
+    """
+    Match an Odds API event to the DB game with the same two teams whose
+    kickoff is closest to the event's start time (within 3 days).
+
+    This used to search only "season 2026, week 3" and accept a game if
+    EITHER team's nickname matched, falling back to the home team's most
+    recent game. From week 4 on, every pulled line was attached to a week-3
+    game, so current-week props never found a real sportsbook line (and
+    nothing could be rated optimal).
+    """
+    target = _event_kickoff_local(commence_time)
+    window = timedelta(days=3)
     games = (
         db.query(Game)
-        .join(Game.home_team.of_type(Team))
-        .filter(Game.season == 2026, Game.week == 3)
+        .filter(Game.kickoff_time.isnot(None), Game.kickoff_time.between(target - window, target + window))
         .all()
     )
 
-    for g in games:
-        h_name = g.home_team.full_name if g.home_team else ""
-        a_name = g.away_team.full_name if g.away_team else ""
-        if home_mascot.lower() in h_name.lower() or away_mascot.lower() in a_name.lower():
-            return g
+    def closest(cands):
+        return min(cands, key=lambda g: abs(g.kickoff_time - target)) if cands else None
 
-    # Fallback to any recent/scheduled game
-    return (
-        db.query(Game)
-        .join(Game.home_team.of_type(Team))
-        .filter(Team.full_name.ilike(f"%{home_mascot}%"))
-        .order_by(Game.kickoff_time.desc())
-        .first()
-    )
+    exact = [g for g in games if _team_matches(g.home_team, home_team_name) and _team_matches(g.away_team, away_team_name)]
+    if exact:
+        return closest(exact)
+    # Neutral-site games can list home/away the other way round.
+    swapped = [g for g in games if _team_matches(g.home_team, away_team_name) and _team_matches(g.away_team, home_team_name)]
+    return closest(swapped)
 
 
 def _find_player(db: Session, player_name: str, game: Optional[Game] = None) -> Optional[Player]:
@@ -269,6 +295,38 @@ def _find_player(db: Session, player_name: str, game: Optional[Game] = None) -> 
         )
         .first()
     )
+
+
+def week_lines_are_fresh(db: Session, max_age_hours: float = 24.0, min_coverage: float = 0.75) -> bool:
+    """
+    True if most of the current week's not-yet-started games already have
+    sportsbook lines pulled within max_age_hours.
+
+    Used to skip re-pulling odds when a refresh is retried or re-run: every
+    pull costs ~96 Odds API credits, and a week of failed refreshes each
+    re-pulling odds used up a 500-credit month.
+    """
+    from backend.ingestion.nfl_data import _current_nfl_week, _current_season
+    from zoneinfo import ZoneInfo
+
+    season = _current_season()
+    week = _current_nfl_week(season, db)
+    now_local = datetime.now(ZoneInfo(settings.scheduler_timezone)).replace(tzinfo=None)
+    upcoming = [
+        g.id for g in db.query(Game.id)
+        .filter(Game.season == season, Game.week == week, Game.kickoff_time > now_local)
+        .all()
+    ]
+    if not upcoming:
+        return False
+    cutoff = datetime.utcnow() - timedelta(hours=max_age_hours)
+    covered = {
+        gid for (gid,) in db.query(MarketLine.game_id)
+        .filter(MarketLine.game_id.in_(upcoming), MarketLine.fetched_at >= cutoff)
+        .distinct()
+        .all()
+    }
+    return len(covered) >= max(1, min_coverage * len(upcoming))
 
 
 def ingest_market_lines(db: Session, max_events: int = 16) -> int:
@@ -309,7 +367,7 @@ def ingest_market_lines(db: Session, max_events: int = 16) -> int:
         home_team = ev.get("home_team", "")
         away_team = ev.get("away_team", "")
 
-        game = _match_game(db, home_team, away_team)
+        game = _match_game(db, home_team, away_team, ev.get("commence_time"))
         if not game:
             continue
 
