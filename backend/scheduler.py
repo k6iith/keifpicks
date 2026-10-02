@@ -290,6 +290,16 @@ def run_weekly_refresh():
         logger.error("Error during weekly depth-chart/prediction refresh: %s", exc)
 
 
+def _pull_odds_unless_fresh(db) -> str:
+    """Pull sportsbook lines, unless this week's were pulled in the last 24h (saves ~96 credits)."""
+    from backend.ingestion.odds import week_lines_are_fresh
+
+    if week_lines_are_fresh(db):
+        logger.info("Skipping odds pull: this week's lines were pulled within the last 24 hours.")
+        return "skipped (lines pulled within 24h)"
+    return f"{ingest_market_lines(db)} lines"
+
+
 def _new_week_refresh(label: str) -> list:
     """
     Roll the site over to the current week. Returns a list of errors.
@@ -314,7 +324,7 @@ def _new_week_refresh(label: str) -> list:
         ("schedule", lambda db: ingest_schedule(db, [season])),
         ("player stats", lambda db: ingest_player_stats(db, [season])),
         ("injuries", ingest_injuries),
-        ("odds", ingest_market_lines),
+        ("odds", _pull_odds_unless_fresh),
     ]
     db = SessionLocal()
     try:
