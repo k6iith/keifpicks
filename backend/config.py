@@ -24,6 +24,8 @@ class Settings(BaseSettings):
     # Time zone for the scheduled refresh jobs' clock times. Kickoff times in
     # the games table are stored as US Eastern local time, so default to that.
     scheduler_timezone: str = "America/New_York"
+    # Time zone for the daily midnight job (Louisiana = US Central).
+    daily_job_timezone: str = "America/Chicago"
     # Key required (X-Admin-Key header) for admin-only endpoints such as the
     # manual odds refresh. Empty = those endpoints are disabled.
     admin_key: str = ""
