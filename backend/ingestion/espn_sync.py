@@ -43,7 +43,14 @@ def sync_espn_rosters_and_depth_charts():
         # Actually better: update players found on ESPN rosters to ACT and set team_id
         
         active_player_ids = set()
-        starter_roster_entries = []
+        # One depth-chart entry per (player, team): ESPN lists players by
+        # formation slot (LCB/RCB, several WR slots, ...), so the same backup
+        # can appear twice, and the rosters table allows one row per player
+        # per team per week. Inserting both used to fail the whole sync with
+        # an IntegrityError, leaving the week with no roster and no
+        # predictions. Keep the player's best (lowest) rank; on a tie prefer
+        # the slot matching his own position.
+        roster_entries: dict = {}
         
         for t_entry in espn_teams:
             t_data = t_entry['team']
@@ -109,16 +116,16 @@ def sync_espn_rosters_and_depth_charts():
                                 
                                 active_player_ids.add(player.id)
                                 
-                                # Add depth chart entry
-                                roster_entry = Roster(
-                                    player_id=player.id,
-                                    team_id=db_team.id,
-                                    season=season,
-                                    week=week,
-                                    depth_chart_position=norm_pos,
-                                    depth_chart_rank=rank_idx
+                                # Depth chart entry (deduplicated, see roster_entries)
+                                key = (player.id, db_team.id)
+                                prev = roster_entries.get(key)
+                                better = (
+                                    prev is None
+                                    or rank_idx < prev[1]
+                                    or (rank_idx == prev[1] and norm_pos == player.position and prev[0] != player.position)
                                 )
-                                db.add(roster_entry)
+                                if better:
+                                    roster_entries[key] = (norm_pos, rank_idx)
             except Exception as e:
                 logger.warning(f"Failed to fetch depth chart for {team_abbr}: {e}")
                 
@@ -149,6 +156,15 @@ def sync_espn_rosters_and_depth_charts():
             except Exception as e:
                 logger.warning(f"Failed to fetch roster for {team_abbr}: {e}")
                 
+        for (player_id, team_id), (pos, rank) in roster_entries.items():
+            db.add(Roster(
+                player_id=player_id,
+                team_id=team_id,
+                season=season,
+                week=week,
+                depth_chart_position=pos,
+                depth_chart_rank=rank,
+            ))
         db.commit()
         logger.info(f"ESPN sync finished: {len(active_player_ids)} active skill players verified.")
         
