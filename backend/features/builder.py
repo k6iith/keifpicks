@@ -28,6 +28,7 @@ import pandas as pd
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
+from backend.db.database import read_rows
 from backend.ingestion.injury_status import ruled_out_player_games
 
 logger = logging.getLogger(__name__)
@@ -111,7 +112,7 @@ def build_player_game_observations(db: Session, seasons: list[int]) -> pd.DataFr
     """)
 
     try:
-        result = db.execute(sql, season_params)
+        result = read_rows(db, sql, season_params)
         rows = result.fetchall()
         cols = list(result.keys())
         df = pd.DataFrame(rows, columns=cols)
@@ -348,7 +349,7 @@ def add_matchup_features(df: pd.DataFrame, db: Session) -> pd.DataFrame:
     """)
 
     try:
-        result = db.execute(sql)
+        result = read_rows(db, sql)
         def_df = pd.DataFrame(result.fetchall(), columns=list(result.keys()))
     except Exception:
         logger.exception("Failed to query defensive stats")
@@ -434,7 +435,7 @@ def add_game_environment_features(df: pd.DataFrame, db: Session) -> pd.DataFrame
 
     sql = text("SELECT game_id, temperature_f, wind_mph, is_dome FROM weather")
     try:
-        res = db.execute(sql)
+        res = read_rows(db, sql)
         weather_df = pd.DataFrame(res.fetchall(), columns=list(res.keys()))
     except Exception:
         weather_df = pd.DataFrame()
@@ -568,7 +569,7 @@ def add_injury_features(
 
     # --- Source 2: historical box-score absence --------------------------
     try:
-        res = db.execute(text("SELECT DISTINCT game_id FROM player_game_stats"))
+        res = read_rows(db, text("SELECT DISTINCT game_id FROM player_game_stats"))
         played_game_ids = {r[0] for r in res.fetchall()}
     except Exception:
         logger.exception("Failed to query played games for injury features")
@@ -587,7 +588,7 @@ def add_injury_features(
     # Match against the depth chart for the injured game's own week, so a
     # player who was a starter in some old snapshot doesn't count.
     try:
-        res = db.execute(text("""
+        res = read_rows(db, text("""
             SELECT r.player_id, g.id AS game_id, r.team_id, r.depth_chart_position
             FROM rosters r
             JOIN games g ON g.season = r.season AND g.week = r.week
@@ -608,7 +609,7 @@ def add_injury_features(
     # df only carries team abbreviations (team_abbr / opponent_abbr), so
     # resolve both to numeric team_id to compare against inj_df's team_id.
     teams_lookup = pd.DataFrame(
-        db.execute(text("SELECT id AS team_id, abbreviation FROM teams")).fetchall(),
+        read_rows(db, text("SELECT id AS team_id, abbreviation FROM teams")).fetchall(),
         columns=["team_id", "abbreviation"],
     )
     df = df.merge(
@@ -759,7 +760,7 @@ def build_current_week_features(db: Session, season: int, week: int) -> pd.DataF
         # Pull a few extra depth-chart levels per position so backups are
         # available to promote when starters are ruled out (trimmed below).
         extra = {f"{pos.lower()}_n": n + 3 for pos, n in _STARTERS_PER_POSITION.items()}
-        res = db.execute(upcoming_sql, {"season": season, "week": week, **extra})
+        res = read_rows(db, upcoming_sql, {"season": season, "week": week, **extra})
         df_upcoming = pd.DataFrame(res.fetchall(), columns=list(res.keys()))
     except Exception:
         logger.exception("Failed to query upcoming starters")
