@@ -8,6 +8,7 @@ Configures recurring APScheduler cron jobs for automated data updates.
 - Wednesday 12:00pm (US Eastern by default): new-week refresh — schedule,
   box scores, injuries, odds, depth charts and predictions for the new week
 - Friday 8am: mid-week injuries refresh + prediction regeneration
+- Sunday 11:45am ET (10:45am Louisiana): game-day injury check
 - Monday 3am: final game stats and model performance recalculation
 """
 import functools
@@ -226,6 +227,24 @@ def run_daily_updates():
 
     except Exception as exc:
         logger.error("Error during daily update: %s", exc)
+    finally:
+        db.close()
+
+
+@_tracked("sunday_injuries", heavy=True)
+def run_sunday_injury_check():
+    """
+    Game-day injury check, Sunday 11:45 AM ET. Teams post official inactives
+    90 minutes before kickoff, so this catches the 1:00 PM games (most of the
+    slate). Only pulls the injury report: the props API hides anyone whose
+    latest report rules them out right away, so no prediction rebuild (and
+    no heavy database work) is needed.
+    """
+    logger.info("⏰ Starting Sunday game-day injury check...")
+    db = SessionLocal()
+    try:
+        count = ingest_injuries(db)
+        logger.info("Sunday injuries update: %d records", count)
     finally:
         db.close()
 
@@ -523,6 +542,17 @@ def start_scheduler():
             CronTrigger(day_of_week="fri", hour=8, minute=0),
             id="midweek_refresh",
             replace_existing=True,
+        )
+
+        # Sunday 11:45 AM ET game-day injury check (inactives come out 90
+        # minutes before the 1:00 PM kickoffs).
+        scheduler.add_job(
+            run_sunday_injury_check,
+            CronTrigger(day_of_week="sun", hour=11, minute=45, timezone=settings.scheduler_timezone),
+            id="sunday_injuries",
+            replace_existing=True,
+            misfire_grace_time=60 * 60,
+            coalesce=True,
         )
 
         # Monday 3:00 AM scoring
