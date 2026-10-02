@@ -1,7 +1,8 @@
 """
 PROPCAST – Background Task Scheduler
 Configures recurring APScheduler cron jobs for automated data updates.
-- Hourly: injuries, weather (NOT odds: see run_hourly_updates)
+- Daily 12:00am Louisiana time (US Central): rosters, injuries, weather
+  (NOT odds: see run_daily_updates), then the missed-week catch-up check
 - Tuesday 6am: weekly schedule and roster refresh
 - Wednesday 5am: model retraining against the newly-completed week
 - Wednesday 12:00pm (US Eastern by default): new-week refresh — schedule,
@@ -17,7 +18,7 @@ from datetime import datetime, timedelta
 
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
-from apscheduler.triggers.interval import IntervalTrigger
+from apscheduler.triggers.date import DateTrigger
 
 from backend.config import settings
 from backend.db.database import SessionLocal
@@ -174,11 +175,15 @@ def sync_hourly_rosters(db: SessionLocal):
 
         teams = {t.abbreviation: t.id for t in db.query(Team).all()}
         df = nfl.import_seasonal_rosters([current_year])
+        # One query for every player instead of one per roster row (~3,000):
+        # each round trip keeps the hosted database awake and billed.
+        ids = [pid for pid in df["player_id"].dropna().unique().tolist() if pid]
+        by_gsis = {p.gsis_id: p for p in db.query(Player).filter(Player.gsis_id.in_(ids)).all()} if ids else {}
         for _, row in df.iterrows():
             pid = row.get("player_id")
             if not pid:
                 continue
-            player = db.query(Player).filter(Player.gsis_id == pid).first()
+            player = by_gsis.get(pid)
             if not player:
                 continue
             new_team = row.get("team")
@@ -188,36 +193,47 @@ def sync_hourly_rosters(db: SessionLocal):
             if new_status and player.status != new_status:
                 player.status = new_status
         db.commit()
-        logger.info("Hourly roster and status synchronization complete.")
+        logger.info("Daily roster and status synchronization complete.")
     except Exception as exc:
         logger.warning("Roster synchronization skipped: %s", exc)
 
 
-@_tracked("hourly_updates", heavy=True, skip_if_busy=True)
-def run_hourly_updates():
+@_tracked("daily_updates", heavy=True)
+def run_daily_updates():
     """
-    Execute hourly jobs: injuries, weather, and roster/status synchronization.
+    Daily job (midnight US Central): injuries, weather, and roster/status
+    synchronization.
+
+    This ran every hour, which kept the hosted Postgres (Neon) awake and
+    billed around the clock and exhausted the free plan's compute quota.
+    Injuries are also refreshed by the Wednesday and Friday jobs.
 
     Sportsbook odds are deliberately NOT pulled here. Each odds pull costs
-    ~96 Odds API credits (6 markets x 16 games); hourly that's ~2,300 a day
-    against a 500-credit monthly plan. Odds are pulled once a week in the
+    ~96 Odds API credits (6 markets x 16 games); daily would be ~2,900 a
+    month against a 500-credit plan. Odds are pulled once a week in the
     Wednesday refresh instead.
     """
-    logger.info("⏰ Starting scheduled hourly update (rosters, injuries, weather)...")
+    logger.info("⏰ Starting daily update (rosters, injuries, weather)...")
     db = SessionLocal()
     try:
         sync_hourly_rosters(db)
 
         injuries_count = ingest_injuries(db)
-        logger.info("Hourly injuries update: %d records", injuries_count)
+        logger.info("Daily injuries update: %d records", injuries_count)
 
         weather_count = ingest_weather_for_upcoming_games(db)
-        logger.info("Hourly weather update: %d records", weather_count)
+        logger.info("Daily weather update: %d records", weather_count)
 
     except Exception as exc:
-        logger.error("Error during scheduled hourly update: %s", exc)
+        logger.error("Error during daily update: %s", exc)
     finally:
         db.close()
+
+
+def run_daily_job():
+    """Midnight job: daily updates, then the missed-week catch-up check."""
+    run_daily_updates()
+    run_catch_up_if_stale()
 
 
 @_tracked("weekly_refresh", heavy=True)
@@ -451,21 +467,24 @@ def start_scheduler():
     if not scheduler.running:
         _mark_interrupted_runs()
 
-        # Self-heal check: a few minutes after startup (lets a first-time
-        # database seed finish), then hourly.
+        # Self-heal check once, a few minutes after startup (lets a
+        # first-time database seed finish). It also runs at the end of the
+        # daily job. Not hourly: every check wakes the hosted database.
         scheduler.add_job(
             run_catch_up_if_stale,
-            IntervalTrigger(hours=1, start_date=datetime.now() + timedelta(minutes=3)),
+            DateTrigger(run_date=datetime.now() + timedelta(minutes=3)),
             id="catch_up_check",
             replace_existing=True,
         )
 
-        # Every hour
+        # Daily at 12:00 AM Louisiana time (US Central; follows DST).
         scheduler.add_job(
-            run_hourly_updates,
-            IntervalTrigger(hours=1),
-            id="hourly_updates",
+            run_daily_job,
+            CronTrigger(hour=0, minute=0, timezone=settings.daily_job_timezone),
+            id="daily_updates",
             replace_existing=True,
+            misfire_grace_time=3 * 60 * 60,
+            coalesce=True,
         )
 
         # Weekly roster/schedule refresh: Tuesday 6:00 AM
@@ -515,7 +534,7 @@ def start_scheduler():
         )
 
         scheduler.start()
-        logger.info("✅ APScheduler started with 7 background pipelines.")
+        logger.info("✅ APScheduler started: %d scheduled jobs.", len(scheduler.get_jobs()))
 
 
 def shutdown_scheduler():
