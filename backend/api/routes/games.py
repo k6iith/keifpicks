@@ -12,7 +12,7 @@ from datetime import date, datetime, timedelta, timezone
 from typing import List
 
 from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy import func, select
+from sqlalchemy import select
 from sqlalchemy.orm import Session, joinedload
 
 from backend.api.schemas import (
@@ -25,6 +25,7 @@ from backend.api.schemas import (
 )
 from backend.db.database import get_db
 from backend.db.models import Game, Injury, Player, PlayerGameStat, Prediction, Team
+from backend.ingestion.nfl_data import current_site_week
 
 logger = logging.getLogger(__name__)
 router = APIRouter(tags=["Games"])
@@ -79,6 +80,16 @@ def get_todays_games(db: Session = Depends(get_db)):
 
 
 # ---------------------------------------------------------------------------
+# GET /api/week
+# ---------------------------------------------------------------------------
+@router.get("/week", summary="Season and week the site is showing")
+def get_current_week(db: Session = Depends(get_db)):
+    """Used by the header badge, so it advances every week on its own."""
+    season, week = current_site_week(db)
+    return {"season": season, "week": week}
+
+
+# ---------------------------------------------------------------------------
 # GET /api/games/week
 # ---------------------------------------------------------------------------
 @router.get(
@@ -88,17 +99,13 @@ def get_todays_games(db: Session = Depends(get_db)):
     responses={200: {"description": "All games in the current NFL week"}},
 )
 def get_week_games(db: Session = Depends(get_db)):
-    """Return all games for the most recent season/week in the database."""
-    # Find the max season first, then max week for that season
-    season_row = db.execute(select(func.max(Game.season))).scalar()
-    if season_row is None:
-        return GameList(games=[], count=0)
+    """
+    Return all games for the week the site is currently showing.
 
-    week_row = db.execute(
-        select(func.max(Game.week)).where(Game.season == season_row)
-    ).scalar()
-    if week_row is None:
-        return GameList(games=[], count=0)
+    This used to take the highest week on file, which is week 18 as soon as
+    the season's schedule is loaded, not the week being played.
+    """
+    season_row, week_row = current_site_week(db)
 
     games = (
         db.execute(

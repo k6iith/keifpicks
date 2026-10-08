@@ -171,6 +171,29 @@ def _current_nfl_week(season: int, db: Optional[Session] = None) -> int:
     return min(max(week, 1), 22)  # cap at Week 22 (postseason)
 
 
+def current_site_week(db: Session) -> tuple[int, int]:
+    """
+    (season, week) the site is showing: the week the prediction pipeline most
+    recently generated current predictions for, so the props page, the week
+    banner and /api/games/week always agree with what the backend built.
+    Falls back to the schedule/calendar estimate before the first prediction
+    run (e.g. a brand new deploy).
+    """
+    from backend.db.models import Prediction
+
+    row = (
+        db.query(Game.season, Game.week)
+        .join(Prediction, Prediction.game_id == Game.id)
+        .filter(Prediction.is_current.is_(True))
+        .order_by(Game.season.desc(), Game.week.desc())
+        .first()
+    )
+    if row:
+        return int(row[0]), int(row[1])
+    season = _current_season()
+    return season, _current_nfl_week(season, db)
+
+
 def _record_pipeline_run(
     db: Session,
     task_name: str,

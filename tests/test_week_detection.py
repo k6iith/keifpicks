@@ -45,3 +45,24 @@ def test_rolls_over_after_monday_night(db, monkeypatch):
 def test_calendar_fallback_without_schedule(db):
     # A season with no games falls back to the calendar estimate without crashing.
     assert 1 <= nfl_data._current_nfl_week(1990, db) <= 22
+
+
+def test_week_endpoint_matches_props_page(client, db):
+    from backend.api.routes.props import _get_today_game_ids
+    from backend.db.models import Game
+
+    w = client.get("/api/week").json()
+    ids = _get_today_game_ids(db)
+    if ids:
+        g = db.get(Game, ids[0])
+        assert (g.season, g.week) == (w["season"], w["week"])
+    games = client.get("/api/games/week").json()["games"]
+    assert all(g["season"] == w["season"] and g["week"] == w["week"] for g in games)
+
+
+def test_header_badge_is_not_hardcoded():
+    from pathlib import Path
+
+    html = (Path(__file__).resolve().parents[1] / "backend/static/index.html").read_text()
+    assert "WEEK 3 LIVE" not in html
+    assert "/api/week" in html

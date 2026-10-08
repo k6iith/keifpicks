@@ -10,6 +10,7 @@ nfl-data-py>=0.3.1
 pandas>=2.1.0
 numpy>=1.26.0
 scikit-learn==1.8.0
+scipy>=1.11.0
 lightgbm>=4.3.0
 shap>=0.44.0
 apscheduler>=3.10.4

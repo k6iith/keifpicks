@@ -201,23 +201,66 @@ PROP_FEATURE_REGISTRY: Dict[str, List[str]] = {
 }
 
 
-# Below this many validation samples the measured bias is mostly week-to-week
-# noise (QB props have ~200), so no correction is applied.
-_MIN_CALIBRATION_SAMPLES = 500
+# Prior strength (in validation samples) for the mean-bias correction: the
+# measured bias is shrunk toward "no correction" by n / (n + this). With
+# ~5,000 WR/TE/RB samples almost all of it is applied; QB props (~200 a
+# window) mostly reflect week-to-week noise, so only ~30% of theirs is. This
+# replaced a hard "no correction below 500 samples" cutoff.
+_CALIBRATION_PRIOR_SAMPLES = 500
+
+# Fewer held-out samples than this and the spread model below isn't fitted;
+# the predictor then falls back to its fixed formula.
+_MIN_DISPERSION_SAMPLES = 150
 
 
 def _calibration_ratio(y_val: np.ndarray, preds: np.ndarray) -> float:
     """
-    Mean-bias correction measured on the held-out window: multiply raw
-    predictions by this so they average out to the actual outcomes. Replaces
-    the hardcoded per-prop percentages the predictor used to apply, which
-    were set against an older model and had drifted badly (e.g. +20% on
-    rushing_yards on top of a model already ~4% high).
+    Mean-bias correction measured on the held-out window (the most recent
+    completed weeks): multiply raw predictions by this so they average out
+    to the actual outcomes. Replaces the hardcoded per-prop percentages the
+    predictor used to apply, which were set against an older model and had
+    drifted badly (e.g. +20% on rushing_yards on top of a model already ~4%
+    high).
     """
     total_pred = float(np.sum(preds))
-    if total_pred <= 0 or len(preds) < _MIN_CALIBRATION_SAMPLES:
+    n = len(preds)
+    if total_pred <= 0 or n == 0:
         return 1.0
-    return float(np.clip(np.sum(y_val) / total_pred, 0.7, 1.3))
+    measured = float(np.sum(y_val)) / total_pred
+    weight = n / (n + _CALIBRATION_PRIOR_SAMPLES)
+    return float(np.clip(1.0 + weight * (measured - 1.0), 0.7, 1.3))
+
+
+def _fit_dispersion(
+    preds: np.ndarray, y_val: np.ndarray, player_std: np.ndarray
+) -> Optional[Dict[str, float]]:
+    """
+    Learn how wide each projection's distribution should be from held-out
+    errors, as  variance = intercept + pred_sq * projection^2 + player_var *
+    player_career_std^2  (non-negative least squares on squared residuals).
+
+    The predictor used to hardcode this as a 50/50 blend of model and player
+    variance plus (0.28 * projection)^2. Those weights decide every Over/Under
+    probability, so they're now measured against what actually happened.
+    """
+    if len(preds) < _MIN_DISPERSION_SAMPLES:
+        return None
+    from scipy.optimize import nnls
+
+    sq_resid = (y_val - preds) ** 2
+    X = np.column_stack([np.ones_like(preds), preds ** 2, player_std ** 2]).astype(np.float64)
+    # Scale columns so NNLS isn't dominated by the projection^2 magnitude.
+    scale = np.maximum(X.mean(axis=0), 1e-9)
+    coefs, _ = nnls(X / scale, sq_resid.astype(np.float64))
+    coefs = coefs / scale
+    if not np.isfinite(coefs).all() or coefs.sum() <= 0:
+        return None
+    return {
+        "intercept": round(float(coefs[0]), 6),
+        "pred_sq": round(float(coefs[1]), 6),
+        "player_var": round(float(coefs[2]), 6),
+        "n": int(len(preds)),
+    }
 
 
 # ===========================================================================
@@ -308,6 +351,18 @@ def train_prop_regressor(
 
     calibration_ratio = _calibration_ratio(y_val, preds)
 
+    # Spread model, fitted on the same calibrated projections and per-player
+    # career std the predictor uses (missing std -> residual std, as there).
+    std_col = f"{target_col}_career_std"
+    player_std = (
+        val_df[std_col].fillna(residual_std).to_numpy(dtype=np.float64)
+        if std_col in val_df.columns
+        else np.full(len(val_df), residual_std)
+    )
+    dispersion = _fit_dispersion(
+        (preds * calibration_ratio).astype(np.float64), y_val.astype(np.float64), np.maximum(1.0, player_std)
+    )
+
     # Baseline comparison (season/career average vs ML model)
     baseline_col = f"{target_col}_weighted_baseline" if f"{target_col}_weighted_baseline" in val_df.columns else f"{target_col}_3wk"
     baseline_preds = val_df[baseline_col].fillna(y_train.mean()).to_numpy(dtype=np.float32) if baseline_col in val_df.columns else np.full_like(y_val, y_train.mean())
@@ -331,6 +386,7 @@ def train_prop_regressor(
         "baseline_rmse": round(base_rmse, 2),
         "residual_std": round(residual_std, 2),
         "calibration_ratio": round(calibration_ratio, 4),
+        "dispersion": dispersion,
         "trained_at": datetime.utcnow().isoformat(),
         "n_samples": len(clean_df),
     }

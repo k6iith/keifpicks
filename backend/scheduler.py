@@ -4,7 +4,9 @@ Configures recurring APScheduler cron jobs for automated data updates.
 - Daily 12:00am Louisiana time (US Central): rosters, injuries, weather
   (NOT odds: see run_daily_updates), then the missed-week catch-up check
 - Tuesday 6am: weekly schedule and roster refresh
-- Wednesday 5am: model retraining against the newly-completed week
+- Wednesday 5am: model retraining against the newly-completed week (pulls
+  the latest box scores first; also re-run after a restart if the live
+  models are more than a week old)
 - Wednesday 12:00pm (US Eastern by default): new-week refresh — schedule,
   box scores, injuries, odds, depth charts and predictions for the new week
 - Friday 8am: mid-week injuries refresh + prediction regeneration
@@ -30,7 +32,7 @@ from backend.ingestion.odds import ingest_market_lines
 from backend.ingestion.nfl_data import ingest_schedule, ingest_players, ingest_player_stats
 from backend.ingestion.espn_sync import sync_espn_rosters_and_depth_charts
 from backend.models.performance import score_completed_games
-from backend.models.retrain import retrain_all_models
+from backend.models.retrain import latest_model_trained_at, restore_models_from_db, retrain_all_models
 
 logger = logging.getLogger(__name__)
 
@@ -44,6 +46,9 @@ _heavy_job_lock = threading.Lock()
 
 # Task names whose successful run produces the current week's predictions.
 _WEEK_BUILDERS = ("weekly_refresh", "wednesday_refresh", "midweek_refresh", "catch_up_refresh", "manual_refresh")
+
+# Task names that retrain the models.
+_RETRAINERS = ("weekly_retraining", "manual_retraining", "catch_up_retraining")
 
 
 # ---------------------------------------------------------------------------
@@ -250,8 +255,20 @@ def run_sunday_injury_check():
 
 
 def run_daily_job():
-    """Midnight job: daily updates, then the missed-week catch-up check."""
+    """Midnight job: daily updates, then the missed-week and stale-model catch-up checks."""
     run_daily_updates()
+    run_catch_up_if_stale()
+    run_retrain_if_stale()
+
+
+def run_startup_checks():
+    """
+    A few minutes after startup: restore retrained models wiped by the
+    restart, retrain if they're stale anyway, then make sure this week has
+    predictions (a catch-up retrain rebuilds them itself).
+    """
+    restore_saved_models()
+    run_retrain_if_stale()
     run_catch_up_if_stale()
 
 
@@ -267,10 +284,13 @@ def run_weekly_refresh():
     what actually keeps that table current, so it belongs here too.
     """
     logger.info("⏰ Starting scheduled weekly refresh...")
+    from backend.ingestion.nfl_data import _current_season
+
     db = SessionLocal()
     try:
-        from datetime import datetime
-        year = datetime.utcnow().year
+        # Season, not calendar year: January/February games belong to the
+        # previous year's season.
+        year = _current_season()
         ingest_schedule(db, [year])
         ingest_players(db, year)
         stats_count = ingest_player_stats(db, [year])
@@ -470,25 +490,137 @@ def run_scoring_job():
         db.close()
 
 
-@_tracked("weekly_retraining", heavy=True)
-def run_retraining_job():
+def _retrain(label: str, regenerate_predictions: bool) -> list:
     """
     Retrain every prop model against all data on file, including whatever
     week just finished. Each model only goes live if it's not meaningfully
     worse than the one it would replace — see retrain_all_models()'s
-    docstring for the guardrail and backup mechanics. Runs the morning
-    after the Tuesday refresh so the just-completed week's stats are
-    already in player_game_stats by the time this runs.
+    docstring for the guardrail, backup and persistence mechanics.
+    Returns a list of errors.
     """
-    logger.info("⏰ Starting scheduled model retraining...")
+    from backend.ingestion.nfl_data import _current_season
+
+    logger.info("⏰ Starting %s model retraining...", label)
+    errors: list = []
     db = SessionLocal()
     try:
+        # Pull box scores first: Tuesday's 6am run can land before
+        # Monday-night stats are published, and those games are exactly
+        # what the retrain is supposed to learn from.
+        try:
+            n = ingest_player_stats(db, [_current_season()])
+            logger.info("Pre-retrain player stats refresh: %d records", n)
+        except Exception as exc:  # noqa: BLE001
+            db.rollback()
+            logger.error("Pre-retrain stats refresh failed (retraining on what's on file): %s", exc)
+            errors.append(f"player stats: {type(exc).__name__}: {exc}")
+
         results = retrain_all_models(db)
         logger.info("Retraining results: %s", results)
-    except Exception as exc:
-        logger.error("Error during retraining job: %s", exc)
     finally:
         db.close()
+    gc.collect()
+
+    if results.get("status") in ("error", "INSUFFICIENT_DATA"):
+        errors.append(f"retrain: {results.get('error') or results['status']}")
+        return errors
+    for prop, r in results.items():
+        if isinstance(r, dict) and r.get("status") == "error":
+            errors.append(f"{prop}: {r.get('error')}")
+    if results.get("persist_error"):
+        errors.append(f"saving models: {results['persist_error']}")
+
+    accepted = [p for p, r in results.items() if isinstance(r, dict) and r.get("status") == "accepted"]
+    if accepted and regenerate_predictions:
+        # Off-schedule retrains don't have the Wednesday noon refresh coming
+        # right after them, so rebuild this week's predictions now.
+        try:
+            sync_espn_rosters_and_depth_charts()
+        except Exception as exc:  # noqa: BLE001
+            logger.error("Prediction refresh after %s retrain failed: %s", label, exc)
+            errors.append(f"predictions: {type(exc).__name__}: {exc}")
+    return errors
+
+
+@_tracked("weekly_retraining", heavy=True)
+def run_retraining_job():
+    """
+    Wednesday 5am: runs the morning after the Tuesday refresh, so the
+    just-completed week is in player_game_stats. Predictions are rebuilt by
+    the Wednesday noon refresh.
+    """
+    return _retrain("scheduled", regenerate_predictions=False)
+
+
+@_tracked("manual_retraining", heavy=True, skip_if_busy=True)
+def run_manual_retraining():
+    """Same as the weekly retrain, started from /admin, then rebuilds predictions."""
+    return _retrain("manual", regenerate_predictions=True)
+
+
+def start_manual_retraining() -> bool:
+    """Start a retrain in the background. False if a heavy job is already running."""
+    if _heavy_job_lock.locked():
+        return False
+    threading.Thread(target=run_manual_retraining, name="manual-retrain", daemon=True).start()
+    return True
+
+
+@_tracked("catch_up_retraining", heavy=True, skip_if_busy=True)
+def _run_catch_up_retraining():
+    return _retrain("catch-up", regenerate_predictions=True)
+
+
+def restore_saved_models() -> None:
+    """Put models from past retrains back on disk (it's wiped on restart/redeploy)."""
+    db = SessionLocal()
+    try:
+        restore_models_from_db(db)
+    except Exception as exc:  # noqa: BLE001
+        db.rollback()
+        logger.warning("Could not restore saved models from the database: %s", exc)
+    finally:
+        db.close()
+
+
+def run_retrain_if_stale():
+    """
+    Self-heal: if the live models are over a week old while games are being
+    played (the Wednesday retrain was missed because the process was asleep
+    or restarting, or it ran but couldn't save), retrain now.
+
+    Won't fire if a retrain started in the last 24 hours, so a retrain the
+    guardrail keeps rejecting (which leaves the old model in place) runs at
+    most once a day instead of on every restart.
+    """
+    trained_at = latest_model_trained_at()
+    now = datetime.utcnow()
+    if trained_at is not None and now - trained_at < timedelta(days=7):
+        return
+    db = SessionLocal()
+    try:
+        recent_final = (
+            db.query(Game.id)
+            .filter(Game.status == "final", Game.kickoff_time >= now - timedelta(days=10))
+            .first()
+        )
+        recent_retrain = (
+            db.query(PipelineRun.id)
+            .filter(
+                PipelineRun.task_name.in_(_RETRAINERS),
+                PipelineRun.started_at >= now - timedelta(hours=24),
+            )
+            .first()
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Stale-model check failed: %s", exc)
+        return
+    finally:
+        db.close()
+    if recent_final is None or recent_retrain is not None:
+        return
+    logger.warning("Live models were last trained %s: running catch-up retrain.", trained_at)
+    _run_catch_up_retraining()
 
 
 def start_scheduler():
@@ -496,11 +628,11 @@ def start_scheduler():
     if not scheduler.running:
         _mark_interrupted_runs()
 
-        # Self-heal check once, a few minutes after startup (lets a
-        # first-time database seed finish). It also runs at the end of the
+        # Self-heal checks once, a few minutes after startup (lets a
+        # first-time database seed finish). They also run at the end of the
         # daily job. Not hourly: every check wakes the hosted database.
         scheduler.add_job(
-            run_catch_up_if_stale,
+            run_startup_checks,
             DateTrigger(run_date=datetime.now() + timedelta(minutes=3)),
             id="catch_up_check",
             replace_existing=True,
@@ -530,6 +662,8 @@ def start_scheduler():
             CronTrigger(day_of_week="wed", hour=5, minute=0),
             id="weekly_retraining",
             replace_existing=True,
+            misfire_grace_time=6 * 60 * 60,
+            coalesce=True,
         )
 
         # Wednesday 12:00 PM new-week refresh (injuries, lines, new week's

@@ -11,6 +11,7 @@ from typing import List, Optional
 
 from sqlalchemy import (
     Boolean,
+    LargeBinary,
     DateTime,
     Enum,
     Float,
@@ -489,3 +490,26 @@ class PipelineRun(Base):
 
     def __repr__(self) -> str:
         return f"<PipelineRun task={self.task_name} status={self.status}>"
+
+
+# ---------------------------------------------------------------------------
+# ModelArtifact
+# ---------------------------------------------------------------------------
+
+class ModelArtifact(Base):
+    """
+    A live model file (.pkl / .json) saved by the weekly retrain. The models/
+    directory is wiped on every restart or redeploy of the hosted app, so
+    without this a retrained model would quietly revert to the committed one.
+    Restored to disk at startup by backend.models.retrain.restore_models_from_db.
+    """
+    __tablename__ = "model_artifacts"
+
+    filename: Mapped[str] = mapped_column(String(200), primary_key=True)
+    content: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    sklearn_version: Mapped[str] = mapped_column(String(50), nullable=False)
+    trained_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    saved_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
+
+    def __repr__(self) -> str:
+        return f"<ModelArtifact {self.filename} trained_at={self.trained_at}>"

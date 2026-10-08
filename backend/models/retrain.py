@@ -14,6 +14,11 @@ Wraps trainer.py's per-prop training functions with:
     retrain that *does* pass the guardrail (or a guardrail that itself
     turns out to be wrong) can still be rolled back by hand.
 
+  - Persistence: every accepted model is also saved to the model_artifacts
+    table. The hosted app's disk is wiped on every restart/redeploy, so
+    without this each retrain would silently revert to the models committed
+    in the repo. restore_models_from_db() puts them back at startup.
+
 This intentionally does NOT change predictor.py's model-loading path: the
 "live" model for each prop is always MODELS_DIR / f"{prop}_v{version}.pkl",
 exactly as load_model() already expects. Only retrain.py's own backup copies
@@ -24,13 +29,16 @@ from __future__ import annotations
 import json
 import logging
 import shutil
-from datetime import date, datetime
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List
 
+import sklearn
 from sqlalchemy.orm import Session
 
+from backend.db.models import ModelArtifact
 from backend.features.builder import build_feature_matrix
+from backend.ingestion.nfl_data import _current_season
 from backend.models.trainer import MODELS_DIR, train_prop_regressor, train_td_model
 
 logger = logging.getLogger(__name__)
@@ -54,11 +62,6 @@ _PROP_TARGET_MAP: Dict[str, str] = {
 # deliberately forgiving — the point is to catch a genuinely broken retrain,
 # not to block every small week-to-week fluctuation.
 _REJECTION_TOLERANCE = 0.05
-
-
-def _current_season() -> int:
-    today = date.today()
-    return today.year if today.month >= 3 else today.year - 1
 
 
 def _backup_live_files(prop_type: str, version: str, extra_suffixes: List[str] | None = None) -> Dict[str, Path]:
@@ -90,6 +93,75 @@ def _restore_backup(backed_up: Dict[str, Path]) -> None:
     """Undo a rejected retrain by copying each backup back over the live file."""
     for original, backup in backed_up.items():
         shutil.copy2(backup, original)
+
+
+def _live_files(prop_type: str, version: str) -> List[Path]:
+    names = [f"{prop_type}_v{version}.pkl", f"{prop_type}_v{version}.json"]
+    if prop_type == "anytime_td":
+        names.append(f"anytime_td_calibrator_v{version}.pkl")
+    return [MODELS_DIR / n for n in names]
+
+
+def _save_models_to_db(db: Session, prop_types: List[str], version: str) -> None:
+    """Store the live files of each newly accepted model in model_artifacts."""
+    for prop_type in prop_types:
+        meta = _read_live_meta(prop_type, version) or {}
+        trained_at = datetime.fromisoformat(meta["trained_at"]) if meta.get("trained_at") else None
+        for path in _live_files(prop_type, version):
+            if not path.exists():
+                continue
+            row = db.get(ModelArtifact, path.name) or ModelArtifact(filename=path.name)
+            row.content = path.read_bytes()
+            row.sklearn_version = sklearn.__version__
+            row.trained_at = trained_at
+            row.saved_at = datetime.utcnow()
+            db.merge(row)
+    db.commit()
+
+
+def restore_models_from_db(db: Session, version: str = "1.0") -> List[str]:
+    """
+    Write any model saved by a past retrain back to MODELS_DIR, if it's newer
+    than the file on disk (the disk copy is the one committed to the repo
+    after a restart or redeploy). Models pickled by a different scikit-learn
+    version are skipped: they can't be loaded. Returns the props restored.
+    """
+    rows = db.query(ModelArtifact).all()
+    by_name = {r.filename: r for r in rows}
+    restored: List[str] = []
+    for prop_type in list(_PROP_TARGET_MAP) + ["anytime_td"]:
+        files = _live_files(prop_type, version)
+        saved = [by_name.get(p.name) for p in files]
+        if any(r is None for r in saved[:2]):
+            continue
+        if any(r is not None and r.sklearn_version != sklearn.__version__ for r in saved):
+            logger.warning(
+                "Not restoring saved %s model: pickled with scikit-learn %s, running %s.",
+                prop_type, saved[0].sklearn_version, sklearn.__version__,
+            )
+            continue
+        live_meta = _read_live_meta(prop_type, version) or {}
+        live_trained = datetime.fromisoformat(live_meta["trained_at"]) if live_meta.get("trained_at") else None
+        saved_trained = saved[1].trained_at
+        if saved_trained is None or (live_trained is not None and saved_trained <= live_trained):
+            continue
+        for path, row in zip(files, saved):
+            if row is not None:
+                path.write_bytes(row.content)
+        restored.append(prop_type)
+    if restored:
+        logger.info("Restored retrained models from the database: %s", restored)
+    return restored
+
+
+def latest_model_trained_at(version: str = "1.0") -> datetime | None:
+    """Most recent trained_at across the live model files, or None."""
+    stamps = []
+    for prop_type in list(_PROP_TARGET_MAP) + ["anytime_td"]:
+        meta = _read_live_meta(prop_type, version) or {}
+        if meta.get("trained_at"):
+            stamps.append(datetime.fromisoformat(meta["trained_at"]))
+    return max(stamps) if stamps else None
 
 
 def _read_live_meta(prop_type: str, version: str) -> Dict[str, Any] | None:
@@ -198,6 +270,15 @@ def retrain_all_models(db: Session, version: str = "1.0") -> Dict[str, Any]:
     except Exception as exc:  # noqa: BLE001
         logger.exception("Retraining anytime_td failed: %s", exc)
         results["anytime_td"] = {"status": "error", "error": str(exc)}
+
+    accepted = [p for p, r in results.items() if r.get("status") == "accepted"]
+    if accepted:
+        try:
+            _save_models_to_db(db, accepted, version)
+        except Exception as exc:  # noqa: BLE001
+            db.rollback()
+            logger.exception("Could not save retrained models to the database: %s", exc)
+            results["persist_error"] = f"{type(exc).__name__}: {exc}"
 
     logger.info("Retraining complete: %s", results)
     return results

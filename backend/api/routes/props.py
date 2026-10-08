@@ -21,7 +21,7 @@ from backend.db.models import Game, MarketLine, Player, Prediction, Team
 from backend.models.play_rating import PlayContext, rate_play
 from backend.models.predictor import calculate_over_under_probability
 from backend.ingestion.injury_status import ruled_out_player_games
-from backend.ingestion.nfl_data import _current_season, _current_nfl_week
+from backend.ingestion.nfl_data import current_site_week
 
 logger = logging.getLogger(__name__)
 router = APIRouter(tags=["Props"])
@@ -325,21 +325,9 @@ def _get_today_game_ids(db: Session) -> List[int]:
     exactly in sync with what the backend actually considers "this week",
     however it got computed. Falls back to the calendar estimate only if
     there are no current predictions yet (e.g. a brand new deploy before
-    the first prediction run).
+    the first prediction run). See current_site_week().
     """
-    current_week = (
-        db.query(Game.season, Game.week)
-        .join(Prediction, Prediction.game_id == Game.id)
-        .filter(Prediction.is_current.is_(True))
-        .order_by(Game.season.desc(), Game.week.desc())
-        .first()
-    )
-
-    if current_week:
-        season, week = current_week
-    else:
-        season = _current_season()
-        week = _current_nfl_week(season)
+    season, week = current_site_week(db)
 
     games = (
         db.query(Game.id)

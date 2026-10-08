@@ -39,6 +39,7 @@
     <div>
       <button id="load">Load status</button>
       <button id="refresh" class="primary">Run weekly refresh now</button>
+      <button id="retrain">Retrain models now</button>
     </div>
     <div class="msg" id="msg"></div>
   </div>
@@ -103,6 +104,16 @@
       setTimeout(loadStatus, 3000);
     } catch (e) { $('msg').textContent = e.message; }
     finally { $('refresh').disabled = false; }
+  };
+  $('retrain').onclick = async () => {
+    if (!confirm('Retrain every model now and rebuild this week\'s predictions? Takes 10-15 minutes.')) return;
+    $('retrain').disabled = true;
+    try {
+      const r = await call('POST', '/api/admin/retrain');
+      $('msg').textContent = r.detail;
+      setTimeout(loadStatus, 3000);
+    } catch (e) { $('msg').textContent = e.message; }
+    finally { $('retrain').disabled = false; }
   };
 </script>
 </body>
