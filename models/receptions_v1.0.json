@@ -22,14 +22,25 @@
     "opp_targets_allowed_to_wr_rank",
     "opp_targets_allowed_to_te_rank",
     "wr1_is_out",
+    "opp_cb1_is_out",
     "qb_is_out"
   ],
-  "mae": 1.28,
+  "mae": 1.26,
   "rmse": 1.7,
   "baseline_mae": 1.28,
   "baseline_rmse": 1.75,
   "residual_std": 1.7,
-  "calibration_ratio": 0.9896,
-  "trained_at": "2026-09-28T22:06:15.333068",
+  "calibration_ratio": 0.9994,
+  "dispersion": {
+    "intercept": 1.382955,
+    "pred_sq": 0.129925,
+    "player_var": 0.205751,
+    "n": 1483
+  },
+  "blend": {
+    "baseline_col": "receptions_weighted_baseline",
+    "model_weight": 0.425
+  },
+  "trained_at": "2026-10-08T18:37:53.623538",
   "n_samples": 18743
 }

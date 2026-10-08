@@ -495,7 +495,7 @@ def _starter_absent_flags(df: pd.DataFrame, played_game_ids: set) -> Dict[str, n
     has no usage at all in this game. That's knowable pre-kickoff (the
     inactive list), so it's not leakage. A starter who got hurt mid-game
     still has usage and is not flagged. Opponent CB1 can't be derived this
-    way (no defensive player stats), so that flag stays report-only.
+    way (no defensive player stats); see _cb1_absent_keys for that one.
     """
     flags = {flag: np.zeros(len(df), dtype=bool) for _, flag in _STARTER_USAGE.values()}
     hist = df[df["game_id"].isin(played_game_ids) & df["team_abbr"].notna()]
@@ -539,6 +539,43 @@ def _starter_absent_flags(df: pd.DataFrame, played_game_ids: set) -> Dict[str, n
     return flags
 
 
+def _cb1_absent_keys(db: Session) -> set:
+    """
+    (season, week, team_abbr) for past games where the team's starting
+    cornerback didn't play a defensive snap. The starter is the CB with the
+    most defensive snaps over the team's previous 3 games that season, the
+    same rule _starter_absent_flags uses for QB/RB1/WR1 (and, like there,
+    an inactive starter is knowable before kickoff, so it isn't leakage).
+    """
+    try:
+        res = read_rows(db, text(
+            "SELECT season, week, team_abbr, pfr_player_id, defense_snaps FROM cb_snap_counts"
+        ))
+        snaps = pd.DataFrame(res.fetchall(), columns=list(res.keys()))
+    except Exception:
+        logger.exception("Failed to query CB snap counts for injury features")
+        return set()
+    if snaps.empty:
+        return set()
+
+    absent = set()
+    snaps = snaps.sort_values(["team_abbr", "season", "week"])
+    for (team, season), tg in snaps.groupby(["team_abbr", "season"], sort=False):
+        window: deque = deque(maxlen=3)
+        for week, wk in tg.groupby("week", sort=True):
+            played = {p: float(n) for p, n in zip(wk["pfr_player_id"], wk["defense_snaps"]) if n > 0}
+            if window:
+                totals: Counter = Counter()
+                for w in window:
+                    totals.update(w)
+                if totals:
+                    leader, _ = totals.most_common(1)[0]
+                    if leader not in played:
+                        absent.add((int(season), int(week), team))
+            window.append(played)
+    return absent
+
+
 def add_injury_features(
     df: pd.DataFrame,
     db: Session,
@@ -552,7 +589,8 @@ def add_injury_features(
       1. Injury reports (latest report per player/game ruling them
          Out/Doubtful/IR), matched to that game week's depth chart starters.
       2. For completed games only, whether the team's established starter
-         was missing from the box score (_starter_absent_flags), so the
+         was missing from the box score (_starter_absent_flags), or for the
+         opponent's CB1, from the snap counts (_cb1_absent_keys), so the
          training history carries real signal for these flags too.
 
     exclude_game_ids: games to skip for source 2, e.g. the upcoming games in
@@ -579,6 +617,16 @@ def add_injury_features(
 
     for flag, values in _starter_absent_flags(df, played_game_ids).items():
         df[flag] = values
+
+    # Opponent CB1: from nflverse snap counts, which (unlike the box scores
+    # above) cover defensive players. Snap rows only exist for games already
+    # played, so upcoming games rely on the injury reports below.
+    cb_absent = _cb1_absent_keys(db)
+    if cb_absent and "opponent_abbr" in df.columns:
+        df["opp_cb1_is_out"] = np.array(
+            [(int(s), int(w), o) in cb_absent for s, w, o in zip(df["season"], df["week"], df["opponent_abbr"])],
+            dtype=bool,
+        )
 
     # --- Source 1: injury reports ----------------------------------------
     out_reports = _latest_out_reports(db)
@@ -631,7 +679,7 @@ def add_injury_features(
     df["qb_is_out"] = df["qb_is_out"].values | _flag("QB", "_own_team_id")
     df["rb1_is_out"] = df["rb1_is_out"].values | _flag("RB", "_own_team_id")
     df["wr1_is_out"] = df["wr1_is_out"].values | _flag("WR", "_own_team_id")
-    df["opp_cb1_is_out"] = _flag("CB", "_opp_team_id")
+    df["opp_cb1_is_out"] = df["opp_cb1_is_out"].values | _flag("CB", "_opp_team_id")
 
     df = df.drop(columns=["_own_team_id", "_opp_team_id"])
 

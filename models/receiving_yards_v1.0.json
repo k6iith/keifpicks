@@ -27,14 +27,25 @@
     "opp_targets_allowed_to_wr_rank",
     "opp_targets_allowed_to_te_rank",
     "wr1_is_out",
+    "opp_cb1_is_out",
     "qb_is_out"
   ],
-  "mae": 17.13,
-  "rmse": 24.54,
-  "baseline_mae": 16.9,
-  "baseline_rmse": 24.84,
-  "residual_std": 24.5,
-  "calibration_ratio": 0.9457,
-  "trained_at": "2026-09-28T22:06:14.168319",
+  "mae": 16.73,
+  "rmse": 24.38,
+  "baseline_mae": 17.0,
+  "baseline_rmse": 24.9,
+  "residual_std": 24.37,
+  "calibration_ratio": 0.9836,
+  "dispersion": {
+    "intercept": 110.324327,
+    "pred_sq": 0.152089,
+    "player_var": 0.607384,
+    "n": 1483
+  },
+  "blend": {
+    "baseline_col": "receiving_yards_weighted_baseline",
+    "model_weight": 0.275
+  },
+  "trained_at": "2026-10-08T18:37:52.532745",
   "n_samples": 18743
 }

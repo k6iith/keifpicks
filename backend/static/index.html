@@ -57,7 +57,7 @@
             </g>
           </svg>
           <span class="font-extrabold text-xl tracking-wider text-blue-500">KEIFS PICKS</span>
-          <span class="bg-blue-950/80 text-blue-400 text-[10px] font-semibold tracking-wider uppercase px-2.5 py-0.5 rounded-full border border-blue-800/50">2026 WEEK 3 LIVE</span>
+          <span class="bg-blue-950/80 text-blue-400 text-[10px] font-semibold tracking-wider uppercase px-2.5 py-0.5 rounded-full border border-blue-800/50" id="week-badge">LIVE</span>
         </a>
         <nav class="hidden md:flex space-x-1 text-sm font-medium text-slate-400">
           <button onclick="switchTab('props')" id="tab-props" class="px-3 py-1.5 rounded-md text-white bg-slate-800/80">Prop Projections</button>
@@ -224,12 +224,26 @@
       <p class="text-slate-400">
         ⚠️ <strong>Important Notice:</strong> Model probabilities are statistical estimates, not guarantees. Sports outcomes contain substantial randomness.
       </p>
-      <p class="text-slate-600 font-mono">KEIFS PICKS • 2026 NFL Machine Intelligence Engine</p>
+      <p class="text-slate-600 font-mono">KEIFS PICKS • <span id="footer-season"></span>NFL Machine Intelligence Engine</p>
     </div>
   </footer>
 
   <script>
     let allProps = [];
+
+    // Header badge follows whatever week the backend is serving, so it
+    // advances on its own every week (it used to be hardcoded to week 3).
+    async function loadWeekBadge() {
+      try {
+        const res = await fetch('/api/week');
+        if (!res.ok) return;
+        const w = await res.json();
+        document.getElementById('week-badge').textContent = w.season + ' WEEK ' + w.week + ' LIVE';
+        document.getElementById('footer-season').textContent = w.season + ' ';
+      } catch (err) {
+        console.error('Failed to load current week:', err);
+      }
+    }
 
     async function loadPlayOfWeek() {
       const container = document.getElementById('potw-container');
@@ -496,6 +510,7 @@
       filterTable();
     }
 
+    loadWeekBadge();
     loadData();
     loadPlayOfWeek();
   </script>

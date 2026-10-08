@@ -25,9 +25,9 @@
     "opp_cb1_is_out",
     "qb_is_out"
   ],
-  "brier_score": 0.13,
-  "log_loss": 0.4163,
+  "brier_score": 0.1301,
+  "log_loss": 0.4159,
   "baseline_brier": 0.1463,
-  "trained_at": "2026-09-28T22:06:15.993554",
+  "trained_at": "2026-10-08T18:37:54.078633",
   "n_samples": 21598
 }

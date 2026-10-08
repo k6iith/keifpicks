@@ -3,8 +3,9 @@ PROPCAST – /api/admin/* endpoints (require the X-Admin-Key header).
 
 - GET  /api/admin/status        current week, its prediction count, recent job runs
 - POST /api/admin/refresh-week  run the new-week refresh now, in the background
+- POST /api/admin/retrain       retrain the models now, then rebuild predictions
 
-Both are disabled unless the ADMIN_KEY setting is configured. The /admin page
+All are disabled unless the ADMIN_KEY setting is configured. The /admin page
 (backend/static/admin.html) is a small form that calls these.
 """
 from __future__ import annotations
@@ -77,4 +78,18 @@ def admin_refresh_week():
         "status": "started",
         "detail": "Refreshing schedule, stats, injuries, odds (~96 credits) and this week's predictions. "
                   "Takes about 5-10 minutes.",
+    }
+
+
+@router.post("/admin/retrain", status_code=202, dependencies=[Depends(require_admin)])
+def admin_retrain():
+    from backend.scheduler import start_manual_retraining
+
+    if not start_manual_retraining():
+        raise HTTPException(status_code=409, detail="A heavy job is already running. Try again in a few minutes.")
+    return {
+        "status": "started",
+        "detail": "Pulling the latest box scores, retraining every model (each only goes live if it "
+                  "isn't worse than the current one), then rebuilding this week's predictions. "
+                  "Takes about 10-15 minutes.",
     }

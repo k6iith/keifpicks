@@ -111,6 +111,7 @@ def generate_predictions_for_features(
             model, meta = models_cache[prop]
             feature_cols = meta.get("features", [])
 
+            real_cols = set(sub_df.columns)
             for c in feature_cols:
                 if c not in sub_df.columns:
                     sub_df[c] = 0.0
@@ -134,60 +135,54 @@ def generate_predictions_for_features(
             else:
                 preds = np.maximum(0.0, model.predict(X_mat))
 
-                # Mean-bias correction measured on held-out games at training
-                # time (trainer._calibration_ratio), stored in the model's
-                # meta. The hardcoded percentages below are only a fallback
-                # for model files trained before that existed: they were set
-                # against an older model and had drifted badly (+20% on
-                # rushing_yards when the model was already ~4% high, which
-                # alone put Tank Bigsby's projection at 43 vs a 12.5 line;
-                # +35% on rushing_attempts when it was ~7% low).
-                #
-                # Empirical calibration (legacy): nudge model projections to correct a
-                # systematic bias measured against actual outcomes.
-                #
-                # This used to be a flat additive offset (e.g. always +11.0
-                # rushing yards) applied to every player regardless of their
-                # own projection. That's fine for a player near the typical
-                # baseline it was calibrated against, but it badly distorts
-                # low-volume players: +11 yards is a small nudge for a
-                # 90-yard workhorse projection and a huge, disproportionate
-                # one for a 15-yard backup's. It also compounds on top of
-                # any other source of an inflated raw projection instead of
-                # scaling with it. Expressing the same correction as a
-                # percentage of each player's own projection keeps the
-                # intended average correction for a typical player while not
-                # blowing up low-output players' numbers.
-                prop_calibration_pcts = {
-                    # value = (previous flat offset) / (typical projection for that prop)
-                    "passing_yards": 7.5 / 230.0,      # ~+3.3%
-                    "rushing_yards": 11.0 / 55.0,      # ~+20%
-                    "receiving_yards": -4.0 / 45.0,    # ~-8.9%
-                    "rushing_attempts": 4.5 / 13.0,    # ~+34.6%
-                    "passing_tds": 0.6 / 1.6,          # ~+37.5%
-                }
-                if meta.get("calibration_ratio") is not None:
-                    preds = np.maximum(0.0, preds * float(meta["calibration_ratio"]))
-                elif prop in prop_calibration_pcts:
-                    preds = np.maximum(0.0, preds * (1.0 + prop_calibration_pcts[prop]))
+                # Blend with the player's weighted baseline, at the weight the
+                # trainer learned (trainer._learn_blend_weight).
+                blend = meta.get("blend")
+                if blend and blend.get("baseline_col") in real_cols:
+                    from backend.models.trainer import _blend
+
+                    baseline = sub_df[blend["baseline_col"]].to_numpy(dtype=np.float64)
+                    preds = _blend(preds, baseline, float(blend["model_weight"]))
+
+                # Mean-bias correction learned from held-out games at training
+                # time (trainer._calibration_ratio), re-measured by every weekly
+                # retrain. This replaced a table of hardcoded per-prop
+                # percentages (+20% rushing_yards, +35% rushing_attempts, ...)
+                # that had been guessed against an older model and drifted
+                # badly: the model was already ~4% high on rushing_yards, which
+                # alone put Tank Bigsby's projection at 43 vs a 12.5 line.
+                ratio = meta.get("calibration_ratio")
+                if ratio is not None:
+                    preds = np.maximum(0.0, preds * float(ratio))
 
                 residual_std = float(meta.get("residual_std", 15.0))
 
-                # Dynamic player-specific uncertainty:
-                # 1. Base residual uncertainty
-                # 2. Player volatility component (from player's historical standard deviation)
-                # 3. Heteroscedastic scaling with projection magnitude (higher volume -> wider variance in yards)
-                hist_std_col = f"{prop}_career_std"
+                # Player-specific historical volatility (career std of the
+                # prop's stat, e.g. carries for rushing_attempts).
+                hist_std_col = f"{meta.get('target_col', prop)}_career_std"
                 if hist_std_col in sub_df.columns:
                     player_vol = sub_df[hist_std_col].fillna(residual_std).to_numpy(dtype=np.float32)
                 else:
                     player_vol = np.full_like(preds, residual_std)
-                
-                # Combine model residual variance with player-specific historical variance
-                combined_base_var = 0.5 * (residual_std ** 2) + 0.5 * (np.maximum(1.0, player_vol) ** 2)
-                std_devs = np.sqrt(combined_base_var + (preds * 0.28) ** 2)
-                std_devs = np.maximum(1.0, std_devs)
-                
+                player_vol = np.maximum(1.0, player_vol)
+
+                disp = meta.get("dispersion")
+                if disp:
+                    # Spread learned from held-out errors (trainer._fit_dispersion):
+                    # how much of the uncertainty is fixed, how much grows with
+                    # the projection, and how much follows the player's own
+                    # game-to-game volatility.
+                    var = (
+                        float(disp["intercept"])
+                        + float(disp["pred_sq"]) * preds ** 2
+                        + float(disp["player_var"]) * player_vol ** 2
+                    )
+                else:
+                    # Fallback for model files trained before the spread was
+                    # learned; replaced on the next retrain.
+                    var = 0.5 * residual_std ** 2 + 0.5 * player_vol ** 2 + (preds * 0.28) ** 2
+                std_devs = np.maximum(1.0, np.sqrt(np.maximum(var, 0.0)))
+
                 p25s = np.maximum(0.0, stats.norm.ppf(0.25, loc=preds, scale=std_devs))
                 p50s = preds
                 p75s = np.maximum(0.0, stats.norm.ppf(0.75, loc=preds, scale=std_devs))

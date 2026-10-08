@@ -25,12 +25,22 @@
     "rb1_is_out",
     "qb_is_out"
   ],
-  "mae": 18.28,
-  "rmse": 26.83,
-  "baseline_mae": 17.95,
-  "baseline_rmse": 26.94,
-  "residual_std": 26.81,
-  "calibration_ratio": 0.9637,
-  "trained_at": "2026-09-28T22:06:10.652714",
+  "mae": 17.57,
+  "rmse": 26.09,
+  "baseline_mae": 18.07,
+  "baseline_rmse": 27.0,
+  "residual_std": 26.09,
+  "calibration_ratio": 1.0086,
+  "dispersion": {
+    "intercept": 180.700066,
+    "pred_sq": 0.195888,
+    "player_var": 0.359637,
+    "n": 628
+  },
+  "blend": {
+    "baseline_col": "rushing_yards_weighted_baseline",
+    "model_weight": 0.375
+  },
+  "trained_at": "2026-10-08T18:37:50.874408",
   "n_samples": 8580
 }

@@ -11,6 +11,7 @@ from typing import List, Optional
 
 from sqlalchemy import (
     Boolean,
+    LargeBinary,
     DateTime,
     Enum,
     Float,
@@ -489,3 +490,51 @@ class PipelineRun(Base):
 
     def __repr__(self) -> str:
         return f"<PipelineRun task={self.task_name} status={self.status}>"
+
+
+# ---------------------------------------------------------------------------
+# CbSnapCount
+# ---------------------------------------------------------------------------
+
+class CbSnapCount(Base):
+    """
+    Defensive snaps per cornerback per game (nflverse snap counts). Used to
+    tell, for past games, whether a team's starting corner sat out, so the
+    opp_cb1_is_out feature has real history to learn from (the injury
+    reports it otherwise relies on are only collected going forward).
+    """
+    __tablename__ = "cb_snap_counts"
+    __table_args__ = (
+        UniqueConstraint("season", "week", "team_abbr", "pfr_player_id", name="uq_cb_snap"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    season: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
+    week: Mapped[int] = mapped_column(Integer, nullable=False)
+    team_abbr: Mapped[str] = mapped_column(String(5), nullable=False)
+    pfr_player_id: Mapped[str] = mapped_column(String(20), nullable=False)
+    player_name: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+    defense_snaps: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+
+
+# ---------------------------------------------------------------------------
+# ModelArtifact
+# ---------------------------------------------------------------------------
+
+class ModelArtifact(Base):
+    """
+    A live model file (.pkl / .json) saved by the weekly retrain. The models/
+    directory is wiped on every restart or redeploy of the hosted app, so
+    without this a retrained model would quietly revert to the committed one.
+    Restored to disk at startup by backend.models.retrain.restore_models_from_db.
+    """
+    __tablename__ = "model_artifacts"
+
+    filename: Mapped[str] = mapped_column(String(200), primary_key=True)
+    content: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    sklearn_version: Mapped[str] = mapped_column(String(50), nullable=False)
+    trained_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    saved_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
+
+    def __repr__(self) -> str:
+        return f"<ModelArtifact {self.filename} trained_at={self.trained_at}>"

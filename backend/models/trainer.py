@@ -201,28 +201,128 @@ PROP_FEATURE_REGISTRY: Dict[str, List[str]] = {
 }
 
 
-# Below this many validation samples the measured bias is mostly week-to-week
-# noise (QB props have ~200), so no correction is applied.
-_MIN_CALIBRATION_SAMPLES = 500
+# Prior strength (in validation samples) for the mean-bias correction: the
+# measured bias is shrunk toward "no correction" by n / (n + this). With
+# ~5,000 WR/TE/RB samples almost all of it is applied; QB props (~200 a
+# window) mostly reflect week-to-week noise, so only ~30% of theirs is. This
+# replaced a hard "no correction below 500 samples" cutoff.
+_CALIBRATION_PRIOR_SAMPLES = 500
+
+# Fewer held-out samples than this and the spread model below isn't fitted;
+# the predictor then falls back to its fixed formula.
+_MIN_DISPERSION_SAMPLES = 150
 
 
 def _calibration_ratio(y_val: np.ndarray, preds: np.ndarray) -> float:
     """
-    Mean-bias correction measured on the held-out window: multiply raw
-    predictions by this so they average out to the actual outcomes. Replaces
-    the hardcoded per-prop percentages the predictor used to apply, which
-    were set against an older model and had drifted badly (e.g. +20% on
-    rushing_yards on top of a model already ~4% high).
+    Mean-bias correction measured on the held-out window (the most recent
+    completed weeks): multiply raw predictions by this so they average out
+    to the actual outcomes. Replaces the hardcoded per-prop percentages the
+    predictor used to apply, which were set against an older model and had
+    drifted badly (e.g. +20% on rushing_yards on top of a model already ~4%
+    high).
     """
     total_pred = float(np.sum(preds))
-    if total_pred <= 0 or len(preds) < _MIN_CALIBRATION_SAMPLES:
+    n = len(preds)
+    if total_pred <= 0 or n == 0:
         return 1.0
-    return float(np.clip(np.sum(y_val) / total_pred, 0.7, 1.3))
+    measured = float(np.sum(y_val)) / total_pred
+    weight = n / (n + _CALIBRATION_PRIOR_SAMPLES)
+    return float(np.clip(1.0 + weight * (measured - 1.0), 0.7, 1.3))
+
+
+def _fit_dispersion(
+    preds: np.ndarray, y_val: np.ndarray, player_std: np.ndarray
+) -> Optional[Dict[str, float]]:
+    """
+    Learn how wide each projection's distribution should be from held-out
+    errors, as  variance = intercept + pred_sq * projection^2 + player_var *
+    player_career_std^2  (non-negative least squares on squared residuals).
+
+    The predictor used to hardcode this as a 50/50 blend of model and player
+    variance plus (0.28 * projection)^2. Those weights decide every Over/Under
+    probability, so they're now measured against what actually happened.
+    """
+    if len(preds) < _MIN_DISPERSION_SAMPLES:
+        return None
+    from scipy.optimize import nnls
+
+    sq_resid = (y_val - preds) ** 2
+    X = np.column_stack([np.ones_like(preds), preds ** 2, player_std ** 2]).astype(np.float64)
+    # Scale columns so NNLS isn't dominated by the projection^2 magnitude.
+    scale = np.maximum(X.mean(axis=0), 1e-9)
+    coefs, _ = nnls(X / scale, sq_resid.astype(np.float64))
+    coefs = coefs / scale
+    if not np.isfinite(coefs).all() or coefs.sum() <= 0:
+        return None
+    return {
+        "intercept": round(float(coefs[0]), 6),
+        "pred_sq": round(float(coefs[1]), 6),
+        "player_var": round(float(coefs[2]), 6),
+        "n": int(len(preds)),
+    }
 
 
 # ===========================================================================
 # Continuous & Count Regressor Training
 # ===========================================================================
+
+# Tuned by backtesting on the last 6 regular-season weeks of 2023, 2024 and
+# 2025 (training on everything before each). The previous settings (63
+# leaves, 10 samples per leaf, learning rate 0.06) overfit: they lost to the
+# plain weighted baseline on 4 of 6 props. Small, heavily regularized trees
+# cut MAE on every prop (e.g. passing_yards 69.4 -> 67.4, rushing_yards
+# 18.8 -> 17.8).
+_REGRESSOR_PARAMS = dict(
+    max_iter=300,
+    learning_rate=0.03,
+    max_leaf_nodes=7,
+    min_samples_leaf=100,
+    l2_regularization=1.0,
+    random_state=42,
+)
+
+
+def _matrix(frame: pd.DataFrame, features: List[str]) -> np.ndarray:
+    return np.ascontiguousarray(frame[features].to_numpy(dtype=np.float32, copy=True))
+
+
+def _fit_regressor(
+    train_df: pd.DataFrame, features: List[str], target_col: str, loss_fn: str
+) -> HistGradientBoostingRegressor:
+    """Fit with more weight on recent seasons (2024 > 2023 > 2022)."""
+    sample_weights = None
+    if "season" in train_df.columns:
+        seasons_arr = train_df["season"].to_numpy()
+        sample_weights = np.exp(0.5 * (seasons_arr - seasons_arr.min()))
+        sample_weights = sample_weights / sample_weights.mean()
+    model = HistGradientBoostingRegressor(loss=loss_fn, **_REGRESSOR_PARAMS)
+    model.fit(
+        _matrix(train_df, features),
+        train_df[target_col].to_numpy(dtype=np.float32),
+        sample_weight=sample_weights,
+    )
+    return model
+
+
+def _blend(model_preds: np.ndarray, baseline: np.ndarray, model_weight: float) -> np.ndarray:
+    """model_weight * model + rest * baseline; the model alone where there's no baseline."""
+    baseline = np.where(np.isnan(baseline), model_preds, baseline)
+    return np.maximum(0.0, model_weight * model_preds + (1.0 - model_weight) * baseline)
+
+
+def _learn_blend_weight(y: np.ndarray, model_preds: np.ndarray, baseline: np.ndarray) -> float:
+    """
+    Weight on the model (vs the player's weighted baseline) that minimizes
+    MAE on a holdout, shrunk halfway toward an even split. In the backtest
+    the best weight swung from 0.05 to 1.0 between seasons, so the raw
+    optimum overfits; the shrunk blend beat the baseline on 5 of 6 props
+    and tied on passing_tds, where the model alone lost on 4 of 6.
+    """
+    grid = np.linspace(0.0, 1.0, 21)
+    maes = [float(np.mean(np.abs(y - _blend(model_preds, baseline, w)))) for w in grid]
+    best = float(grid[int(np.argmin(maes))])
+    return 0.5 * best + 0.25
 
 def train_prop_regressor(
     df: pd.DataFrame,
@@ -250,6 +350,7 @@ def train_prop_regressor(
     clean_df = df.dropna(subset=[target_col]).copy()
     if prop_type in pos_map and "position" in clean_df.columns:
         clean_df = clean_df[clean_df["position"].isin(pos_map[prop_type])].copy()
+    clean_df = clean_df.reset_index(drop=True)
 
     if clean_df.empty or len(clean_df) < 50:
         logger.warning("Insufficient samples for training %s", prop_type)
@@ -263,6 +364,10 @@ def train_prop_regressor(
         and clean_df[f].nunique() > 1
     ]
 
+    # Baseline columns before the 0-fill below: a missing baseline means "no
+    # history", not "averages zero".
+    raw_baseline = clean_df[[c for c in (f"{target_col}_weighted_baseline", f"{target_col}_3wk") if c in clean_df.columns]].copy()
+
     for c in features:
         clean_df[c] = clean_df[c].fillna(0.0)
 
@@ -274,33 +379,37 @@ def train_prop_regressor(
     # noise, not an actually worse model).
     train_df, val_df = _rolling_time_split(clean_df)
 
-    X_train = np.ascontiguousarray(train_df[features].to_numpy(dtype=np.float32, copy=True))
-    y_train = np.ascontiguousarray(train_df[target_col].to_numpy(dtype=np.float32, copy=True))
-    X_val = np.ascontiguousarray(val_df[features].to_numpy(dtype=np.float32, copy=True))
-    y_val = np.ascontiguousarray(val_df[target_col].to_numpy(dtype=np.float32, copy=True))
-
-    # Temporal sample weighting: give higher training weight to more recent seasons (e.g., 2024 > 2023 > 2022)
-    sample_weights = None
-    if "season" in train_df.columns:
-        seasons_arr = train_df["season"].to_numpy()
-        min_s = seasons_arr.min()
-        sample_weights = np.exp(0.5 * (seasons_arr - min_s))
-        sample_weights = sample_weights / sample_weights.mean()
-
     loss_fn = "poisson" if prop_type in ["receptions", "rushing_attempts", "passing_tds"] else "squared_error"
+    baseline_col = f"{target_col}_weighted_baseline"
+    if baseline_col not in raw_baseline.columns:
+        baseline_col = None
 
-    model = HistGradientBoostingRegressor(
-        loss=loss_fn,
-        max_iter=300,
-        learning_rate=0.06,
-        max_leaf_nodes=63,
-        min_samples_leaf=10,
-        l2_regularization=0.1,
-        random_state=42,
-    )
-    model.fit(X_train, y_train, sample_weight=sample_weights)
+    # How much to trust the model vs the player's weighted baseline, learned
+    # on the last weeks of the TRAINING data (never the validation window
+    # the MAE below is reported on).
+    model_weight = 1.0
+    if baseline_col is not None:
+        inner_train, inner_val = _rolling_time_split(train_df)
+        if len(inner_train) >= 50 and len(inner_val) > 0:
+            inner_model = _fit_regressor(inner_train, features, target_col, loss_fn)
+            inner_preds = np.maximum(0.0, inner_model.predict(_matrix(inner_val, features)))
+            model_weight = _learn_blend_weight(
+                inner_val[target_col].to_numpy(dtype=np.float64),
+                inner_preds,
+                raw_baseline.loc[inner_val.index, baseline_col].to_numpy(dtype=np.float64),
+            )
+            del inner_model
 
-    preds = np.maximum(0.0, model.predict(X_val))
+    model = _fit_regressor(train_df, features, target_col, loss_fn)
+
+    y_train = train_df[target_col].to_numpy(dtype=np.float32)
+    y_val = val_df[target_col].to_numpy(dtype=np.float32)
+    model_preds = np.maximum(0.0, model.predict(_matrix(val_df, features)))
+    if baseline_col is not None:
+        val_baseline = raw_baseline.loc[val_df.index, baseline_col].to_numpy(dtype=np.float64)
+        preds = _blend(model_preds, val_baseline, model_weight)
+    else:
+        preds = model_preds
     mae = float(mean_absolute_error(y_val, preds))
     rmse = float(np.sqrt(mean_squared_error(y_val, preds)))
     residuals = y_val - preds
@@ -308,9 +417,26 @@ def train_prop_regressor(
 
     calibration_ratio = _calibration_ratio(y_val, preds)
 
-    # Baseline comparison (season/career average vs ML model)
-    baseline_col = f"{target_col}_weighted_baseline" if f"{target_col}_weighted_baseline" in val_df.columns else f"{target_col}_3wk"
-    baseline_preds = val_df[baseline_col].fillna(y_train.mean()).to_numpy(dtype=np.float32) if baseline_col in val_df.columns else np.full_like(y_val, y_train.mean())
+    # Spread model, fitted on the same calibrated projections and per-player
+    # career std the predictor uses (missing std -> residual std, as there).
+    std_col = f"{target_col}_career_std"
+    player_std = (
+        val_df[std_col].fillna(residual_std).to_numpy(dtype=np.float64)
+        if std_col in val_df.columns
+        else np.full(len(val_df), residual_std)
+    )
+    dispersion = _fit_dispersion(
+        (preds * calibration_ratio).astype(np.float64), y_val.astype(np.float64), np.maximum(1.0, player_std)
+    )
+
+    # Baseline comparison (the player's weighted baseline alone vs the model).
+    # Uses the raw column: the feature copy has missing values filled with 0,
+    # which used to make the baseline look worse than it is.
+    bcol = baseline_col or f"{target_col}_3wk"
+    if bcol in raw_baseline.columns:
+        baseline_preds = raw_baseline.loc[val_df.index, bcol].fillna(float(y_train.mean())).to_numpy(dtype=np.float32)
+    else:
+        baseline_preds = np.full_like(y_val, y_train.mean())
     base_mae = float(mean_absolute_error(y_val, baseline_preds))
     base_rmse = float(np.sqrt(mean_squared_error(y_val, baseline_preds)))
 
@@ -331,6 +457,8 @@ def train_prop_regressor(
         "baseline_rmse": round(base_rmse, 2),
         "residual_std": round(residual_std, 2),
         "calibration_ratio": round(calibration_ratio, 4),
+        "dispersion": dispersion,
+        "blend": {"baseline_col": baseline_col, "model_weight": round(model_weight, 3)} if baseline_col else None,
         "trained_at": datetime.utcnow().isoformat(),
         "n_samples": len(clean_df),
     }
