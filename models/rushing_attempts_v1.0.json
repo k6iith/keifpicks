@@ -19,12 +19,22 @@
     "rb1_is_out",
     "qb_is_out"
   ],
-  "mae": 3.17,
-  "rmse": 4.49,
-  "baseline_mae": 3.08,
-  "baseline_rmse": 4.42,
-  "residual_std": 4.47,
-  "calibration_ratio": 1.0774,
-  "trained_at": "2026-09-28T22:06:12.993261",
+  "mae": 3.03,
+  "rmse": 4.24,
+  "baseline_mae": 3.11,
+  "baseline_rmse": 4.44,
+  "residual_std": 4.24,
+  "calibration_ratio": 1.0163,
+  "dispersion": {
+    "intercept": 7.49004,
+    "pred_sq": 0.089234,
+    "player_var": 0.261603,
+    "n": 628
+  },
+  "blend": {
+    "baseline_col": "carries_weighted_baseline",
+    "model_weight": 0.5
+  },
+  "trained_at": "2026-10-08T18:37:51.612201",
   "n_samples": 8580
 }

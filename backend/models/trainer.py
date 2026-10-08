@@ -267,6 +267,63 @@ def _fit_dispersion(
 # Continuous & Count Regressor Training
 # ===========================================================================
 
+# Tuned by backtesting on the last 6 regular-season weeks of 2023, 2024 and
+# 2025 (training on everything before each). The previous settings (63
+# leaves, 10 samples per leaf, learning rate 0.06) overfit: they lost to the
+# plain weighted baseline on 4 of 6 props. Small, heavily regularized trees
+# cut MAE on every prop (e.g. passing_yards 69.4 -> 67.4, rushing_yards
+# 18.8 -> 17.8).
+_REGRESSOR_PARAMS = dict(
+    max_iter=300,
+    learning_rate=0.03,
+    max_leaf_nodes=7,
+    min_samples_leaf=100,
+    l2_regularization=1.0,
+    random_state=42,
+)
+
+
+def _matrix(frame: pd.DataFrame, features: List[str]) -> np.ndarray:
+    return np.ascontiguousarray(frame[features].to_numpy(dtype=np.float32, copy=True))
+
+
+def _fit_regressor(
+    train_df: pd.DataFrame, features: List[str], target_col: str, loss_fn: str
+) -> HistGradientBoostingRegressor:
+    """Fit with more weight on recent seasons (2024 > 2023 > 2022)."""
+    sample_weights = None
+    if "season" in train_df.columns:
+        seasons_arr = train_df["season"].to_numpy()
+        sample_weights = np.exp(0.5 * (seasons_arr - seasons_arr.min()))
+        sample_weights = sample_weights / sample_weights.mean()
+    model = HistGradientBoostingRegressor(loss=loss_fn, **_REGRESSOR_PARAMS)
+    model.fit(
+        _matrix(train_df, features),
+        train_df[target_col].to_numpy(dtype=np.float32),
+        sample_weight=sample_weights,
+    )
+    return model
+
+
+def _blend(model_preds: np.ndarray, baseline: np.ndarray, model_weight: float) -> np.ndarray:
+    """model_weight * model + rest * baseline; the model alone where there's no baseline."""
+    baseline = np.where(np.isnan(baseline), model_preds, baseline)
+    return np.maximum(0.0, model_weight * model_preds + (1.0 - model_weight) * baseline)
+
+
+def _learn_blend_weight(y: np.ndarray, model_preds: np.ndarray, baseline: np.ndarray) -> float:
+    """
+    Weight on the model (vs the player's weighted baseline) that minimizes
+    MAE on a holdout, shrunk halfway toward an even split. In the backtest
+    the best weight swung from 0.05 to 1.0 between seasons, so the raw
+    optimum overfits; the shrunk blend beat the baseline on 5 of 6 props
+    and tied on passing_tds, where the model alone lost on 4 of 6.
+    """
+    grid = np.linspace(0.0, 1.0, 21)
+    maes = [float(np.mean(np.abs(y - _blend(model_preds, baseline, w)))) for w in grid]
+    best = float(grid[int(np.argmin(maes))])
+    return 0.5 * best + 0.25
+
 def train_prop_regressor(
     df: pd.DataFrame,
     target_col: str,
@@ -293,6 +350,7 @@ def train_prop_regressor(
     clean_df = df.dropna(subset=[target_col]).copy()
     if prop_type in pos_map and "position" in clean_df.columns:
         clean_df = clean_df[clean_df["position"].isin(pos_map[prop_type])].copy()
+    clean_df = clean_df.reset_index(drop=True)
 
     if clean_df.empty or len(clean_df) < 50:
         logger.warning("Insufficient samples for training %s", prop_type)
@@ -306,6 +364,10 @@ def train_prop_regressor(
         and clean_df[f].nunique() > 1
     ]
 
+    # Baseline columns before the 0-fill below: a missing baseline means "no
+    # history", not "averages zero".
+    raw_baseline = clean_df[[c for c in (f"{target_col}_weighted_baseline", f"{target_col}_3wk") if c in clean_df.columns]].copy()
+
     for c in features:
         clean_df[c] = clean_df[c].fillna(0.0)
 
@@ -317,33 +379,37 @@ def train_prop_regressor(
     # noise, not an actually worse model).
     train_df, val_df = _rolling_time_split(clean_df)
 
-    X_train = np.ascontiguousarray(train_df[features].to_numpy(dtype=np.float32, copy=True))
-    y_train = np.ascontiguousarray(train_df[target_col].to_numpy(dtype=np.float32, copy=True))
-    X_val = np.ascontiguousarray(val_df[features].to_numpy(dtype=np.float32, copy=True))
-    y_val = np.ascontiguousarray(val_df[target_col].to_numpy(dtype=np.float32, copy=True))
-
-    # Temporal sample weighting: give higher training weight to more recent seasons (e.g., 2024 > 2023 > 2022)
-    sample_weights = None
-    if "season" in train_df.columns:
-        seasons_arr = train_df["season"].to_numpy()
-        min_s = seasons_arr.min()
-        sample_weights = np.exp(0.5 * (seasons_arr - min_s))
-        sample_weights = sample_weights / sample_weights.mean()
-
     loss_fn = "poisson" if prop_type in ["receptions", "rushing_attempts", "passing_tds"] else "squared_error"
+    baseline_col = f"{target_col}_weighted_baseline"
+    if baseline_col not in raw_baseline.columns:
+        baseline_col = None
 
-    model = HistGradientBoostingRegressor(
-        loss=loss_fn,
-        max_iter=300,
-        learning_rate=0.06,
-        max_leaf_nodes=63,
-        min_samples_leaf=10,
-        l2_regularization=0.1,
-        random_state=42,
-    )
-    model.fit(X_train, y_train, sample_weight=sample_weights)
+    # How much to trust the model vs the player's weighted baseline, learned
+    # on the last weeks of the TRAINING data (never the validation window
+    # the MAE below is reported on).
+    model_weight = 1.0
+    if baseline_col is not None:
+        inner_train, inner_val = _rolling_time_split(train_df)
+        if len(inner_train) >= 50 and len(inner_val) > 0:
+            inner_model = _fit_regressor(inner_train, features, target_col, loss_fn)
+            inner_preds = np.maximum(0.0, inner_model.predict(_matrix(inner_val, features)))
+            model_weight = _learn_blend_weight(
+                inner_val[target_col].to_numpy(dtype=np.float64),
+                inner_preds,
+                raw_baseline.loc[inner_val.index, baseline_col].to_numpy(dtype=np.float64),
+            )
+            del inner_model
 
-    preds = np.maximum(0.0, model.predict(X_val))
+    model = _fit_regressor(train_df, features, target_col, loss_fn)
+
+    y_train = train_df[target_col].to_numpy(dtype=np.float32)
+    y_val = val_df[target_col].to_numpy(dtype=np.float32)
+    model_preds = np.maximum(0.0, model.predict(_matrix(val_df, features)))
+    if baseline_col is not None:
+        val_baseline = raw_baseline.loc[val_df.index, baseline_col].to_numpy(dtype=np.float64)
+        preds = _blend(model_preds, val_baseline, model_weight)
+    else:
+        preds = model_preds
     mae = float(mean_absolute_error(y_val, preds))
     rmse = float(np.sqrt(mean_squared_error(y_val, preds)))
     residuals = y_val - preds
@@ -363,9 +429,14 @@ def train_prop_regressor(
         (preds * calibration_ratio).astype(np.float64), y_val.astype(np.float64), np.maximum(1.0, player_std)
     )
 
-    # Baseline comparison (season/career average vs ML model)
-    baseline_col = f"{target_col}_weighted_baseline" if f"{target_col}_weighted_baseline" in val_df.columns else f"{target_col}_3wk"
-    baseline_preds = val_df[baseline_col].fillna(y_train.mean()).to_numpy(dtype=np.float32) if baseline_col in val_df.columns else np.full_like(y_val, y_train.mean())
+    # Baseline comparison (the player's weighted baseline alone vs the model).
+    # Uses the raw column: the feature copy has missing values filled with 0,
+    # which used to make the baseline look worse than it is.
+    bcol = baseline_col or f"{target_col}_3wk"
+    if bcol in raw_baseline.columns:
+        baseline_preds = raw_baseline.loc[val_df.index, bcol].fillna(float(y_train.mean())).to_numpy(dtype=np.float32)
+    else:
+        baseline_preds = np.full_like(y_val, y_train.mean())
     base_mae = float(mean_absolute_error(y_val, baseline_preds))
     base_rmse = float(np.sqrt(mean_squared_error(y_val, baseline_preds)))
 
@@ -387,6 +458,7 @@ def train_prop_regressor(
         "residual_std": round(residual_std, 2),
         "calibration_ratio": round(calibration_ratio, 4),
         "dispersion": dispersion,
+        "blend": {"baseline_col": baseline_col, "model_weight": round(model_weight, 3)} if baseline_col else None,
         "trained_at": datetime.utcnow().isoformat(),
         "n_samples": len(clean_df),
     }

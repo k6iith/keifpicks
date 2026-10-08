@@ -109,3 +109,40 @@ def test_models_from_another_sklearn_version_are_not_restored(db, models_dir):
 
 def test_admin_retrain_requires_key(client):
     assert client.post("/api/admin/retrain").status_code == 403
+
+
+def test_blend_falls_back_to_model_without_baseline():
+    model = np.array([10.0, 20.0])
+    baseline = np.array([30.0, np.nan])
+    assert trainer._blend(model, baseline, 0.5).tolist() == [20.0, 20.0]
+
+
+def test_blend_weight_is_learned_and_shrunk():
+    rng = np.random.default_rng(1)
+    y = rng.uniform(0, 100, 2000)
+    good, bad = y + rng.normal(0, 2, y.size), y + rng.normal(0, 40, y.size)
+    # Model clearly better -> leans model, but never all the way (shrunk toward 0.5).
+    assert trainer._learn_blend_weight(y, good, bad) == pytest.approx(0.75, abs=0.03)
+    assert trainer._learn_blend_weight(y, bad, good) == pytest.approx(0.25, abs=0.03)
+
+
+def test_committed_models_beat_their_baseline():
+    from backend.models.trainer import MODELS_DIR
+
+    for prop in ["passing_yards", "rushing_yards", "rushing_attempts", "receiving_yards", "receptions"]:
+        meta = json.loads((MODELS_DIR / f"{prop}_v1.0.json").read_text())
+        assert meta["mae"] < meta["baseline_mae"], prop
+        assert meta["blend"] and meta["dispersion"], prop
+
+
+def test_starting_cb_absence_comes_from_snap_counts(db):
+    from sqlalchemy import text
+
+    from backend.features.builder import _cb1_absent_keys
+
+    absent = _cb1_absent_keys(db)
+    team_games = db.execute(text(
+        "SELECT COUNT(*) FROM (SELECT DISTINCT season, week, team_abbr FROM cb_snap_counts)"
+    )).scalar()
+    # A starting corner sits out a few percent of games, not never and not always.
+    assert 0.01 < len(absent) / team_games < 0.2

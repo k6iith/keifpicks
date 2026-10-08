@@ -493,6 +493,31 @@ class PipelineRun(Base):
 
 
 # ---------------------------------------------------------------------------
+# CbSnapCount
+# ---------------------------------------------------------------------------
+
+class CbSnapCount(Base):
+    """
+    Defensive snaps per cornerback per game (nflverse snap counts). Used to
+    tell, for past games, whether a team's starting corner sat out, so the
+    opp_cb1_is_out feature has real history to learn from (the injury
+    reports it otherwise relies on are only collected going forward).
+    """
+    __tablename__ = "cb_snap_counts"
+    __table_args__ = (
+        UniqueConstraint("season", "week", "team_abbr", "pfr_player_id", name="uq_cb_snap"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    season: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
+    week: Mapped[int] = mapped_column(Integer, nullable=False)
+    team_abbr: Mapped[str] = mapped_column(String(5), nullable=False)
+    pfr_player_id: Mapped[str] = mapped_column(String(20), nullable=False)
+    player_name: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+    defense_snaps: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+
+
+# ---------------------------------------------------------------------------
 # ModelArtifact
 # ---------------------------------------------------------------------------
 

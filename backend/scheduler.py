@@ -29,7 +29,7 @@ from backend.db.models import Game, PipelineRun, PipelineStatus, Prediction
 from backend.ingestion.injuries import ingest_injuries
 from backend.ingestion.weather import ingest_weather_for_upcoming_games
 from backend.ingestion.odds import ingest_market_lines
-from backend.ingestion.nfl_data import ingest_schedule, ingest_players, ingest_player_stats
+from backend.ingestion.nfl_data import ingest_cb_snap_counts, ingest_schedule, ingest_players, ingest_player_stats
 from backend.ingestion.espn_sync import sync_espn_rosters_and_depth_charts
 from backend.models.performance import score_completed_games
 from backend.models.retrain import latest_model_trained_at, restore_models_from_db, retrain_all_models
@@ -295,6 +295,7 @@ def run_weekly_refresh():
         ingest_players(db, year)
         stats_count = ingest_player_stats(db, [year])
         logger.info("Weekly player stats refresh: %d records", stats_count)
+        logger.info("Weekly CB snap counts refresh: %d records", ingest_cb_snap_counts(db, [year]))
     except Exception as exc:
         logger.error("Error during weekly refresh: %s", exc)
     finally:
@@ -508,8 +509,14 @@ def _retrain(label: str, regenerate_predictions: bool) -> list:
         # Monday-night stats are published, and those games are exactly
         # what the retrain is supposed to learn from.
         try:
-            n = ingest_player_stats(db, [_current_season()])
+            season = _current_season()
+            n = ingest_player_stats(db, [season])
             logger.info("Pre-retrain player stats refresh: %d records", n)
+            # Snap counts behind the opp_cb1_is_out feature: past seasons
+            # once (backfill), the current season every time.
+            n = ingest_cb_snap_counts(db, list(range(2022, season)), only_missing=True)
+            n += ingest_cb_snap_counts(db, [season])
+            logger.info("Pre-retrain CB snap counts refresh: %d records", n)
         except Exception as exc:  # noqa: BLE001
             db.rollback()
             logger.error("Pre-retrain stats refresh failed (retraining on what's on file): %s", exc)

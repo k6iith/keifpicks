@@ -111,6 +111,7 @@ def generate_predictions_for_features(
             model, meta = models_cache[prop]
             feature_cols = meta.get("features", [])
 
+            real_cols = set(sub_df.columns)
             for c in feature_cols:
                 if c not in sub_df.columns:
                     sub_df[c] = 0.0
@@ -133,6 +134,15 @@ def generate_predictions_for_features(
                 p75s = np.clip(probs * 1.5, 0.0, 1.0)
             else:
                 preds = np.maximum(0.0, model.predict(X_mat))
+
+                # Blend with the player's weighted baseline, at the weight the
+                # trainer learned (trainer._learn_blend_weight).
+                blend = meta.get("blend")
+                if blend and blend.get("baseline_col") in real_cols:
+                    from backend.models.trainer import _blend
+
+                    baseline = sub_df[blend["baseline_col"]].to_numpy(dtype=np.float64)
+                    preds = _blend(preds, baseline, float(blend["model_weight"]))
 
                 # Mean-bias correction learned from held-out games at training
                 # time (trainer._calibration_ratio), re-measured by every weekly

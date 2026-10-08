@@ -23,12 +23,22 @@
     "opp_pass_yards_allowed_rank",
     "qb_is_out"
   ],
-  "mae": 68.86,
-  "rmse": 88.71,
-  "baseline_mae": 71.45,
-  "baseline_rmse": 93.24,
-  "residual_std": 88.18,
-  "calibration_ratio": 1.0,
-  "trained_at": "2026-09-28T22:06:06.029541",
+  "mae": 66.92,
+  "rmse": 85.54,
+  "baseline_mae": 72.37,
+  "baseline_rmse": 94.2,
+  "residual_std": 85.41,
+  "calibration_ratio": 0.9927,
+  "dispersion": {
+    "intercept": 4509.743352,
+    "pred_sq": 0.048209,
+    "player_var": 0.148746,
+    "n": 200
+  },
+  "blend": {
+    "baseline_col": "passing_yards_weighted_baseline",
+    "model_weight": 0.75
+  },
+  "trained_at": "2026-10-08T18:37:49.638916",
   "n_samples": 2698
 }

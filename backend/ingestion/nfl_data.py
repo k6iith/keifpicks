@@ -602,6 +602,56 @@ def _fetch_weekly_stats_df(seasons: list[int]) -> pd.DataFrame:
     return df
 
 
+def ingest_cb_snap_counts(db: Session, seasons: list[int], only_missing: bool = False) -> int:
+    """
+    Replace the cb_snap_counts rows for each season with nflverse's snap
+    counts for cornerbacks. only_missing skips seasons that already have
+    rows (finished seasons never change, so a backfill only needs them once).
+    Returns rows written.
+    """
+    from backend.db.models import CbSnapCount
+
+    if only_missing:
+        have = {s for (s,) in db.query(CbSnapCount.season).distinct()}
+        seasons = [s for s in seasons if s not in have]
+    if not seasons:
+        return 0
+
+    import nfl_data_py as nfl
+
+    written = 0
+    for season in seasons:
+        try:
+            df = nfl.import_snap_counts([season])
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Fetching snap counts for %d failed: %s", season, exc)
+            continue
+        if df is None or df.empty:
+            continue
+        # A few team-seasons list every defensive back as "DB" with no "CB"
+        # rows at all; use their DBs rather than leave the team out.
+        teams_with_cb = set(df.loc[df["position"] == "CB", "team"])
+        is_cb = (df["position"] == "CB") | ((df["position"] == "DB") & ~df["team"].isin(teams_with_cb))
+        df = df[is_cb & df["pfr_player_id"].notna()]
+        df = df.drop_duplicates(subset=["week", "team", "pfr_player_id"])
+        db.query(CbSnapCount).filter(CbSnapCount.season == season).delete()
+        db.bulk_insert_mappings(CbSnapCount, [
+            {
+                "season": season,
+                "week": int(r.week),
+                "team_abbr": r.team,
+                "pfr_player_id": r.pfr_player_id,
+                "player_name": r.player,
+                "defense_snaps": int(r.defense_snaps or 0),
+            }
+            for r in df.itertuples(index=False)
+        ])
+        db.commit()
+        written += len(df)
+        logger.info("CB snap counts for %d: %d rows", season, len(df))
+    return written
+
+
 def ingest_player_stats(db: Session, seasons: list[int]) -> int:
     """
     Fetch weekly player stats and upsert PlayerGameStat records.
