@@ -95,6 +95,17 @@ def sync_espn_rosters_and_depth_charts():
                                 # otherwise every sync spawns a duplicate Player whose
                                 # predictions never see the real Player's market lines.
                                 player = find_player_by_name(db, ath_name, team_ids=[db_team.id], positions=[norm_pos])
+                                # A player this sync created earlier under a
+                                # name ESPN has since changed ("Matthew" ->
+                                # "Matt") isn't found by name. Reuse that row
+                                # by its ESPN id: inserting a second one
+                                # violated the unique gsis_id and failed the
+                                # whole sync, leaving the week with no
+                                # predictions.
+                                if not player and ath.get('id'):
+                                    player = db.query(Player).filter(Player.gsis_id == f"ESPN_{ath['id']}").first()
+                                if not player and not ath.get('id'):
+                                    continue
                                 if not player:
                                     # Try fuzzy or create
                                     player = Player(
